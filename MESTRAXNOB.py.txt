@@ -1,0 +1,215 @@
+"""
+MESTRAX PROXY - Activation Bot (Fixed)
+"""
+
+import asyncio
+import logging
+import random
+import string
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
+
+BOT_TOKEN = "8793194323:AAHKmUdqo5ORU-mQL0JruB7U2vF1SRt-pHk"
+OWNER_ID = 8254258071
+KEY_LENGTH = 16
+
+active_keys = []
+used_keys = []
+
+logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
+
+
+def gen_key():
+    return "".join(random.choices(string.ascii_uppercase + string.digits, k=KEY_LENGTH))
+
+
+WELCOME = (
+    "┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n"
+    "┃   🔐 MESTRAX PROXY v2.9 IOS  ┃\n"
+    "┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
+    "🛡 *Secure Proxy Activation System*\n\n"
+    "📌 *Instructions:*\n"
+    "Send your activation key below to verify\n"
+    "and connect to MESTRAX proxy servers.\n\n"
+    "⬇️ *Send your key now:*"
+
+)
+
+SUCCESS_MSG = (
+    "┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n"
+    "┃       ✅ VERIFIED         ┃\n"
+    "┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
+    "🟢 *Key verified successfully!*\n\n"
+    "┌─────────────────────────┐\n"
+    "│ ✅ Status: Connected    │\n"
+    "│ 🌐 Proxy: MESTRAX-PRO   │\n"
+    "│ 📶 Signal: Strong       │\n"
+    "│ 🔒 Protocol: Encrypted   │\n"
+    "│ ⏱ Ping: 12ms             │\n"
+    "└─────────────────────────┘\n\n"
+    "🔐 *Your proxy is now active.*\n"
+    "Enjoy secure browsing! 🚀"
+)
+
+FAILED_MSG = (
+    "┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n"
+    "┃       ❌ FAILED           ┃\n"
+    "┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
+    "🔴 *Verification failed!*\n\n"
+    "┌─────────────────────────┐\n"
+    "│ ❌ Status: Rejected      │\n"
+    "│ 🔑 Key: Invalid         │\n"
+    "│ 🚫 Access: Denied       │\n"
+    "└─────────────────────────┘\n\n"
+    "⚠ The key you entered is invalid\n"
+    "or has expired.\n\n"
+    "💡 *Contact admin: @MESTRAXMODZ*"
+)
+
+USED_MSG = (
+    "┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n"
+    "┃    ⚠️ ALREADY USED        ┃\n"
+    "┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
+    "🟡 *This key has already been used.*\n\n"
+    "Each key can only be activated once.\n\n"
+    "💡 *Contact admin: @MESTRAXMODZ*"
+)
+
+
+def admin_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔑 Generate Key", callback_data="gen_key")],
+        [InlineKeyboardButton("📦 View Keys", callback_data="view_keys")],
+        [InlineKeyboardButton("🗑 Delete All", callback_data="del_keys")],
+    ])
+
+
+async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔑 I have a key", callback_data="has_key")],
+        [InlineKeyboardButton("🆘 Contact Admin", url="https://t.me/MESTRAXMODZ")],
+    ])
+    await update.message.reply_text(WELCOME, reply_markup=kb, parse_mode="Markdown")
+    ctx.user_data["state"] = "waiting_key"
+
+
+async def admin_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("⛔ Access denied.", parse_mode="Markdown")
+        return
+    await update.message.reply_text(
+        "🔐 *Admin Panel - MESTRAX PROXY*\n\nChoose action:",
+        reply_markup=admin_keyboard(),
+        parse_mode="Markdown",
+    )
+
+
+async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    data = query.data
+
+    if data == "has_key":
+        await query.edit_message_text(
+            "⬇️ *Send your activation key now:*",
+            parse_mode="Markdown",
+        )
+        ctx.user_data["state"] = "waiting_key"
+
+    elif data == "gen_key":
+        if uid != OWNER_ID:
+            await query.answer("⛔ Access denied!", show_alert=True)
+            return
+        key = gen_key()
+        active_keys.append(key)
+        kb = admin_keyboard()
+        await query.edit_message_text(
+            f"🔑 *New Key Generated*\n\n`{key}`\n\n"
+            f"📊 Active: {len(active_keys)} | Used: {len(used_keys)}",
+            reply_markup=kb,
+            parse_mode="Markdown",
+        )
+
+    elif data == "view_keys":
+        if uid != OWNER_ID:
+            await query.answer("⛔ Access denied!", show_alert=True)
+            return
+        if not active_keys:
+            msg = "📦 *No active keys.*"
+        else:
+            keys = "\n".join(f"  `{k}`" for k in active_keys)
+            msg = f"📦 *Active Keys ({len(active_keys)})*\n\n{keys}"
+        await query.edit_message_text(msg, reply_markup=admin_keyboard(), parse_mode="Markdown")
+
+    elif data == "del_keys":
+        if uid != OWNER_ID:
+            await query.answer("⛔ Access denied!", show_alert=True)
+            return
+        active_keys.clear()
+        used_keys.clear()
+        await query.edit_message_text("🗑 *All keys deleted.*", reply_markup=admin_keyboard(), parse_mode="Markdown")
+
+
+async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    state = ctx.user_data.get("state", "menu")
+    text = update.message.text.strip()
+
+    if state == "waiting_key":
+        # Step 1
+        msg = await update.message.reply_text(
+            "⏳ *Processing your key...*\n\n🔍 Connecting to server...",
+            parse_mode="Markdown"
+        )
+        # Step 2
+        await msg.edit_message_text(
+            "⏳ *Processing your key...*\n\n✅ Connecting to server...\n📡 Verifying license...",
+            parse_mode="Markdown"
+        )
+        # Step 3
+        await msg.edit_message_text(
+            "⏳ *Processing your key...*\n\n✅ Connecting to server...\n✅ Verifying license...\n🔒 Checking authenticity...",
+            parse_mode="Markdown"
+        )
+        # Step 4 - Result
+        if text in used_keys:
+            await msg.edit_message_text(USED_MSG, parse_mode="Markdown")
+        elif text in active_keys:
+            active_keys.remove(text)
+            used_keys.append(text)
+            await msg.edit_message_text(SUCCESS_MSG, parse_mode="Markdown")
+        else:
+            await msg.edit_message_text(FAILED_MSG, parse_mode="Markdown")
+
+        ctx.user_data["state"] = "menu"
+        return
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔑 I have a key", callback_data="has_key")],
+        [InlineKeyboardButton("🆘 CHANNEL ADMIN", url="https://t.me/MESTRAXMODS")],
+    ])
+    await update.message.reply_text(WELCOME, reply_markup=kb, parse_mode="Markdown")
+    ctx.user_data["state"] = "waiting_key"
+
+
+def main():
+    print("🔐 MESTRAX PROXY Bot Starting...")
+    print(f"   Owner ID: {OWNER_ID}")
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("admin", admin_cmd))
+    app.add_handler(CallbackQueryHandler(on_button))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
+    print("✅ Bot Running! Commands: /start /admin")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+
+if __name__ == "__main__":
+    main()
