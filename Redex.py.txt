@@ -1,0 +1,341 @@
+"""
+╔═══════════════════════════════════════════╗
+║   xTop1Proxy - Professional Proxy Bot    ║
+║   Clone Style Bot                         ║
+╚═══════════════════════════════════════════╝
+"""
+
+import logging
+import random
+import string
+import asyncio
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
+
+# ── Config ──
+BOT_TOKEN = "8997265877:AAEqh_tKxDAR9Oe0cmdCFRX1cpIPgNb8daU"
+OWNER_ID = 8254258071
+OWNER_PASSWORD = "S4TEXXPROXY"
+KEY_LENGTH = 12
+
+active_keys = []
+used_keys = []
+
+logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
+
+
+def gen_key():
+    return "".join(random.choices(string.ascii_uppercase + string.digits, k=KEY_LENGTH))
+
+
+# ── Messages ──
+WELCOME = (
+    "╔══════════════════════════════╗\n"
+    "║  🔥  MENTRAX x Redexx Proxy Bot          ║\n"
+    "║  Version 9.0                 ║\n"
+    "╚══════════════════════════════╝\n\n"
+    "🌐 *PROXY ACTIVATION SYSTEM*\n\n"
+    "📌 Send your activation key to\n"
+    "   connect to our servers.\n\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    "📊 Server Status: 🟢 Online\n"
+    "👥 Active Users: 1,247\n"
+    "📶 Speed: 150 Mbps\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    "⬇️ *Send your key below:*"
+)
+
+MAIN_MENU = (
+    "╔══════════════════════════════╗\n"
+    "║  🔥 MENTRAX x Redexx Proxy          ║\n"
+    "║  Version 8.0                 ║\n"
+    "╚══════════════════════════════╝\n\n"
+    "🌐 *Main Menu*\n\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    "📊 Server Status: 🟢 Online\n"
+    "👥 Active Users: 1,247\n"
+    "📶 Speed: 150 Mbps\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    "Choose an option:"
+)
+
+CHECK_IP = (
+    "🌐 *IP Information*\n\n"
+    "Click below to check your IP:\n\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    "🔒 Your connection is secured\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━"
+)
+
+STATS_MSG = (
+    "📊 *Server Statistics*\n\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    "🖥 Servers: 12 Active\n"
+    "👥 Online Users: 1,247\n"
+    "📶 Avg Speed: 150 Mbps\n"
+    "🔒 Protocol: AES-256\n"
+    "⏱ Uptime: 99.9%\n"
+    "🌍 Locations: US, EU, Asia\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    "✅ All systems operational"
+)
+
+HELP_MSG = (
+    "📖 *How to Use*\n\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    "📌 *Step 1:*\n"
+    "   Get an activation key\n"
+    "   from our admin.\n\n"
+    "📌 *Step 2:*\n"
+    "   Click 'Activate Key'\n"
+    "   and send your key.\n\n"
+    "📌 *Step 3:*\n"
+    "   Wait for verification.\n\n"
+    "📌 *Step 4:*\n"
+    "   Your proxy will be\n"
+    "   connected automatically.\n\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    "💡 Need help? Contact admin:\n"
+    "   👤 @MESTRAXMODZ"
+)
+
+SUCCESS_MSG = (
+    "╔══════════════════════════════╗\n"
+    "║      ✅ VERIFIED             ║\n"
+    "╚══════════════════════════════╝\n\n"
+    "🟢 *Proxy Connected Successfully!*\n\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    "│ ✅ Status    : Connected     │\n"
+    "│ 🌐 Proxy     : REDEX-PRO     │\n"
+    "│ 📶 Signal    : Strong        │\n"
+    "│ 🔒 Encryption: AES-256       │\n"
+    "│ ⏱ Ping      : 8ms           │\n"
+    "│ 🌍 Server    :  155.117.40.185     │\n"
+    "│ 📶 PORT     : 10056      │\n"
+    "│ ⏰ Expires   : 1 Days       │\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    "🔐 *Your proxy is now active.*\n"
+    "Enjoy secure & fast browsing! 🚀"
+)
+
+FAILED_MSG = (
+    "╔══════════════════════════════╗\n"
+    "║      ❌ FAILED               ║\n"
+    "╚══════════════════════════════╝\n\n"
+    "🔴 *Verification Failed!*\n\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    "│ ❌ Status   : Rejected      │\n"
+    "│ 🔑 Key      : Invalid       │\n"
+    "│ 🚫 Access   : Denied        │\n"
+    "│ 📋 Reason   : Key not found │\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    "⚠ The key you entered is\n"
+    "   invalid or has expired.\n\n"
+    "💡 *Contact admin: @MESTRAXMODZ or @RedeXxModz*"
+)
+
+USED_MSG = (
+    "╔══════════════════════════════╗\n"
+    "║    ⚠️ ALREADY USED            ║\n"
+    "╚══════════════════════════════╝\n\n"
+    "🟡 *This key has already been used.*\n\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    "│ ⚠️ Status   : Used           │\n"
+    "│ 👤 Used By  : Previous User  │\n"
+    "│ 🚫 Access   : Denied        │\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    "Each key can only be used once.\n\n"
+    "💡 *Contact admin: @MESTRAXMODZ or @RedeXxModz*"
+)
+
+ASK_KEY = "⬇️ *Send your activation key now:*\n\n🔑 Type your key below:"
+ASK_PASSWORD = "🔒 *Admin Access*\n\nSend the password:"
+
+
+def main_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔑 Activate Key", callback_data="activate")],
+        [InlineKeyboardButton("🌐 Check IP", callback_data="check_ip")],
+        [InlineKeyboardButton("📊 Server Stats", callback_data="stats")],
+        [InlineKeyboardButton("📖 How to Use", callback_data="help")],
+        [InlineKeyboardButton("🆘 Contact Ownrt", url="https://t.me/MESTRAXMODZ")],
+        [InlineKeyboardButton("🆘 Contact Admin", url="https://@RedeXxModz")],
+        [InlineKeyboardButton("🔐 Admin Panel MESTRAX", callback_data="ask_pass")],
+    ])
+
+def back_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔙 Back to Menu", callback_data="main_menu")],
+    ])
+
+def admin_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔑 Generate Key", callback_data="gen_key")],
+        [InlineKeyboardButton("📦 View All Keys", callback_data="view_keys")],
+        [InlineKeyboardButton("🗑 Delete All Keys", callback_data="del_keys")],
+        [InlineKeyboardButton("🔙 Back to Menu", callback_data="main_menu")],
+    ])
+
+def gen_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔑 Generate Another", callback_data="gen_key")],
+        [InlineKeyboardButton("📦 View Keys", callback_data="view_keys")],
+        [InlineKeyboardButton("🗑 Delete All", callback_data="del_keys")],
+        [InlineKeyboardButton("🔙 Menu", callback_data="main_menu")],
+    ])
+
+
+async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(WELCOME, reply_markup=main_keyboard(), parse_mode="Markdown")
+
+
+async def admin_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("⛔ Access denied.", parse_mode="Markdown")
+        return
+    await update.message.reply_text(
+        "🔐 *Admin Panel - xTop1Proxy*\n\nChoose action:",
+        reply_markup=admin_keyboard(),
+        parse_mode="Markdown",
+    )
+
+
+async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    data = query.data
+
+    if data == "main_menu":
+        await query.edit_message_text(MAIN_MENU, reply_markup=main_keyboard(), parse_mode="Markdown")
+        ctx.user_data["state"] = "menu"
+
+    elif data == "activate":
+        await query.edit_message_text(ASK_KEY, reply_markup=back_keyboard(), parse_mode="Markdown")
+        ctx.user_data["state"] = "waiting_key"
+
+    elif data == "check_ip":
+        await query.edit_message_text(CHECK_IP, reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔗 Check My IP", url="https://api.my-ip.io/v2/ip.json")],
+            [InlineKeyboardButton("🔙 Back", callback_data="main_menu")],
+        ]), parse_mode="Markdown")
+
+    elif data == "stats":
+        await query.edit_message_text(STATS_MSG, reply_markup=back_keyboard(), parse_mode="Markdown")
+
+    elif data == "help":
+        await query.edit_message_text(HELP_MSG, reply_markup=back_keyboard(), parse_mode="Markdown")
+
+    elif data == "ask_pass":
+        await query.edit_message_text(ASK_PASSWORD, reply_markup=back_keyboard(), parse_mode="Markdown")
+        ctx.user_data["state"] = "waiting_pass"
+
+    # ── Admin Actions ──
+    elif data == "gen_key":
+        if uid != OWNER_ID:
+            await query.answer("⛔ Not authorized!", show_alert=True)
+            return
+        key = gen_key()
+        active_keys.append(key)
+        await query.edit_message_text(
+            f"🔑 *Key Generated!*\n\n`{key}`\n\n"
+            f"📊 Active: {len(active_keys)} | Used: {len(used_keys)}",
+            reply_markup=gen_keyboard(),
+            parse_mode="Markdown",
+        )
+
+    elif data == "view_keys":
+        if uid != OWNER_ID:
+            await query.answer("⛔ Not authorized!", show_alert=True)
+            return
+        if not active_keys:
+            msg = "📦 *No active keys.*\n\nGenerate new keys first."
+        else:
+            keys = "\n".join(f"  🔑 `{k}`" for k in active_keys)
+            msg = f"📦 *Active Keys ({len(active_keys)})*\n\n{keys}"
+        await query.edit_message_text(msg, reply_markup=admin_keyboard(), parse_mode="Markdown")
+
+    elif data == "del_keys":
+        if uid != OWNER_ID:
+            await query.answer("⛔ Not authorized!", show_alert=True)
+            return
+        active_keys.clear()
+        used_keys.clear()
+        await query.edit_message_text(
+            "🗑 *All keys deleted.*",
+            reply_markup=admin_keyboard(),
+            parse_mode="Markdown",
+        )
+
+
+async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    state = ctx.user_data.get("state", "menu")
+    uid = update.effective_user.id
+    text = update.message.text.strip()
+
+    # ── Password check ──
+    if state == "waiting_pass":
+        if text == OWNER_PASSWORD and uid == OWNER_ID:
+            await update.message.reply_text(
+                "✅ *Access Granted*\n\n🔐 Admin Panel:",
+                reply_markup=admin_keyboard(),
+                parse_mode="Markdown",
+            )
+            ctx.user_data["state"] = "owner"
+        else:
+            await update.message.reply_text(
+                "❌ *Wrong password.*",
+                reply_markup=main_keyboard(),
+                parse_mode="Markdown",
+            )
+            ctx.user_data["state"] = "menu"
+        return
+
+    # ── Key activation ──
+    if state == "waiting_key":
+        msg = await update.message.reply_text(
+            "⏳ *Processing key...*\n\n🔍 Connecting to server...", parse_mode="Markdown"
+        )
+        await msg.edit_message_text(
+            "⏳ *Processing key...*\n\n✅ Connecting to server...\n📡 Verifying license...", parse_mode="Markdown"
+        )
+        await msg.edit_message_text(
+            "⏳ *Processing key...*\n\n✅ Connecting to server...\n✅ Verifying license...\n🔒 Authenticating...", parse_mode="Markdown"
+        )
+        if text in used_keys:
+            await msg.edit_message_text(USED_MSG, parse_mode="Markdown")
+        elif text in active_keys:
+            active_keys.remove(text)
+            used_keys.append(text)
+            await msg.edit_message_text(SUCCESS_MSG, parse_mode="Markdown")
+        else:
+            await msg.edit_message_text(FAILED_MSG, parse_mode="Markdown")
+        ctx.user_data["state"] = "menu"
+        return
+
+    # ── Default ──
+    await update.message.reply_text(MAIN_MENU, reply_markup=main_keyboard(), parse_mode="Markdown")
+    ctx.user_data["state"] = "menu"
+
+
+def main():
+    print("🔥 MESTRAX Proxy Bot Starting...")
+    print(f"   Owner: {OWNER_ID}")
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("admin", admin_cmd))
+    app.add_handler(CallbackQueryHandler(on_button))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
+    print("✅ Running! /start /admin")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+
+if __name__ == "__main__":
+    main()
