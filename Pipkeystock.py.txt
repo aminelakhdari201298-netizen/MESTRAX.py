@@ -1,0 +1,316 @@
+"""
+╔═══════════════════════════════════════════╗
+║   MESTRAX Proxy - Professional Proxy Bot  ║
+║   Enhanced Edition - Reseller Support     ║
+╚═══════════════════════════════════════════╝
+"""
+
+import logging
+import random
+import string
+import threading
+import os
+from datetime import datetime, timedelta
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
+from flask import Flask
+
+# ── Flask Web Server ──
+app_flask = Flask('')
+
+@app_flask.route('/')
+def home():
+    return "✅ MESTRAX Proxy Bot is running!"
+
+@app_flask.route('/health')
+def health():
+    return "OK", 200
+
+def run_flask():
+    app_flask.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
+
+# تشغيل السيرفر في خلفية لضمان الاستمرارية على منصات الاستضافة
+threading.Thread(target=run_flask, daemon=True).start()
+
+# ── Config ──
+BOT_TOKEN = "8793194323:AAG9bmeH0--51Cwj-jW6RSlhC2bhRMGdO6A"
+OWNER_ID = 8254258071
+OWNER_PASSWORD = "S4TEXXPROXY"
+KEY_LENGTH = 12
+
+# ── In‑memory storage ──
+active_keys = []       # list of dict: {"key": str, "expiry": datetime, "duration": int, "creator_id": int, "banned": bool}
+used_keys = []         # list of dict: {"key": str, "user_id": int, "ip": str, "activated_at": datetime, "expiry": datetime}
+resellers = set()      # set of user IDs
+
+logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
+
+def gen_key():
+    return "".join(random.choices(string.ascii_uppercase + string.digits, k=KEY_LENGTH))
+
+def clean_expired_keys():
+    """إزالة المفاتيح المنتهية"""
+    now = datetime.now()
+    global active_keys
+    active_keys = [k for k in active_keys if k["expiry"] > now]
+
+# ── Keyboards ──
+def main_keyboard():
+    return ReplyKeyboardMarkup([
+        [KeyboardButton("🔑 Activate Key"), KeyboardButton("🌐 Check My IP")],
+        [KeyboardButton("📊 Server Stats"), KeyboardButton("📖 How to Use")],
+        [KeyboardButton("👤 Contact Owner"), KeyboardButton("🔐 Admin/Reseller Panel")]
+    ], resize_keyboard=True)
+
+def cancel_keyboard():
+    return ReplyKeyboardMarkup([
+        [KeyboardButton("🔙 Back to Menu")]
+    ], resize_keyboard=True)
+
+def owner_keyboard():
+    return ReplyKeyboardMarkup([
+        [KeyboardButton("🔑 Generate Keys"), KeyboardButton("📦 View All Keys")],
+        [KeyboardButton("➕ Add Reseller"), KeyboardButton("🚫 Ban Key")],
+        [KeyboardButton("🗑 Delete All Keys"), KeyboardButton("🔙 Back to Menu")]
+    ], resize_keyboard=True)
+
+def reseller_keyboard():
+    return ReplyKeyboardMarkup([
+        [KeyboardButton("🔑 Generate Keys"), KeyboardButton("📦 View My Keys")],
+        [KeyboardButton("🔙 Back to Menu")]
+    ], resize_keyboard=True)
+
+def quantity_keyboard():
+    return ReplyKeyboardMarkup([
+        [KeyboardButton("1"), KeyboardButton("5")],
+        [KeyboardButton("10"), KeyboardButton("50")],
+        [KeyboardButton("🔙 Back to Menu")]
+    ], resize_keyboard=True)
+
+def duration_keyboard():
+    return ReplyKeyboardMarkup([
+        [KeyboardButton("1 Day"), KeyboardButton("7 Days")],
+        [KeyboardButton("30 Days"), KeyboardButton("365 Days")],
+        [KeyboardButton("🔙 Back to Menu")]
+    ], resize_keyboard=True)
+
+# ── Handlers ──
+async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    clean_expired_keys()
+    ctx.user_data["state"] = "menu"
+    msg = (
+        "╔══════════════════════════════╗\n"
+        "║  🔥 MESTRAX PROXY SAFE       ║\n"
+        "║  Version 9.0                 ║\n"
+        "╚══════════════════════════════╝\n\n"
+        "🌐 *PROXY ACTIVATION SYSTEM*\n\n"
+        "📌 Send your activation key to connect."
+    )
+    await update.message.reply_text(msg, reply_markup=main_keyboard(), parse_mode="Markdown")
+
+async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    uid = update.effective_user.id
+    state = ctx.user_data.get("state", "menu")
+
+    # ── Global Navigation ──
+    if text == "🔙 Back to Menu":
+        ctx.user_data["state"] = "menu"
+        await update.message.reply_text("🌐 *Main Menu*", reply_markup=main_keyboard(), parse_mode="Markdown")
+        return
+
+    # ── Main Menu Actions ──
+    if text == "🔑 Activate Key":
+        ctx.user_data["state"] = "waiting_key"
+        await update.message.reply_text("⬇️ *Send your activation key now:*", reply_markup=cancel_keyboard(), parse_mode="Markdown")
+        return
+
+    elif text == "🌐 Check My IP":
+        await update.message.reply_text("🌐 *Your IP Information*\n🔗 https://api.ipify.org?format=json", reply_markup=main_keyboard())
+        return
+
+    elif text == "📊 Server Stats":
+        msg = "📊 *Server Statistics*\n\n🖥 Servers: Active\n🔒 Protocol: AES-256\n⏱ Uptime: 99.9%"
+        await update.message.reply_text(msg, reply_markup=main_keyboard(), parse_mode="Markdown")
+        return
+
+    elif text == "📖 How to Use":
+        msg = "📖 *How to Use*\n1. Get Key\n2. Click Activate\n3. Send Key\n4. Send IP\n5. Enjoy!"
+        await update.message.reply_text(msg, reply_markup=main_keyboard(), parse_mode="Markdown")
+        return
+
+    elif text == "🔐 Admin/Reseller Panel":
+        if uid == OWNER_ID:
+            ctx.user_data["state"] = "owner_panel"
+            await update.message.reply_text("🔐 *Owner Panel*", reply_markup=owner_keyboard(), parse_mode="Markdown")
+        elif uid in resellers:
+            ctx.user_data["state"] = "reseller_panel"
+            await update.message.reply_text("💼 *Reseller Panel*", reply_markup=reseller_keyboard(), parse_mode="Markdown")
+        else:
+            ctx.user_data["state"] = "waiting_pass"
+            await update.message.reply_text("🔒 *Admin Access*\n\nSend the password:", reply_markup=cancel_keyboard(), parse_mode="Markdown")
+        return
+
+    # ── Authentication ──
+    if state == "waiting_pass":
+        if text == OWNER_PASSWORD:
+            ctx.user_data["state"] = "owner_panel"
+            await update.message.reply_text("✅ *Access Granted*", reply_markup=owner_keyboard(), parse_mode="Markdown")
+        else:
+            ctx.user_data["state"] = "menu"
+            await update.message.reply_text("❌ *Wrong password.*", reply_markup=main_keyboard(), parse_mode="Markdown")
+        return
+
+    # ── Panel Actions (Owner / Reseller) ──
+    if text == "🔑 Generate Keys" and state in ["owner_panel", "reseller_panel"]:
+        ctx.user_data["state"] = "waiting_bulk_amount"
+        await update.message.reply_text("🔢 *How many keys do you want to generate?*", reply_markup=quantity_keyboard(), parse_mode="Markdown")
+        return
+
+    if state == "waiting_bulk_amount":
+        if text.isdigit():
+            ctx.user_data["gen_amount"] = int(text)
+            ctx.user_data["state"] = "waiting_bulk_duration"
+            await update.message.reply_text("⏳ *Choose key duration:*", reply_markup=duration_keyboard(), parse_mode="Markdown")
+        else:
+            await update.message.reply_text("❌ Please enter a valid number.", reply_markup=quantity_keyboard())
+        return
+
+    if state == "waiting_bulk_duration" and text.endswith("Days") or text.endswith("Day"):
+        days = int(text.split()[0])
+        amount = ctx.user_data.get("gen_amount", 1)
+        generated = []
+        
+        for _ in range(amount):
+            k = gen_key()
+            expiry = datetime.now() + timedelta(days=days)
+            active_keys.append({"key": k, "expiry": expiry, "duration": days, "creator_id": uid, "banned": False})
+            generated.append(f"`{k}`")
+            
+        kb = owner_keyboard() if uid == OWNER_ID else reseller_keyboard()
+        ctx.user_data["state"] = "owner_panel" if uid == OWNER_ID else "reseller_panel"
+        
+        await update.message.reply_text(
+            f"✅ *Successfully generated {amount} keys ({days} Days):*\n\n" + "\n".join(generated),
+            reply_markup=kb, parse_mode="Markdown"
+        )
+        return
+
+    if text == "📦 View All Keys" and uid == OWNER_ID:
+        clean_expired_keys()
+        lines = [f"`{k['key']}` - Exp: {k['expiry'].strftime('%Y-%m-%d')} - {'🚫BANNED' if k['banned'] else '✅ACTIVE'}" for k in active_keys]
+        msg = f"📦 *All Active Keys ({len(lines)})*\n\n" + "\n".join(lines) if lines else "No active keys."
+        await update.message.reply_text(msg, reply_markup=owner_keyboard(), parse_mode="Markdown")
+        return
+
+    if text == "📦 View My Keys" and uid in resellers:
+        clean_expired_keys()
+        lines = [f"`{k['key']}` - Exp: {k['expiry'].strftime('%Y-%m-%d')} - {'🚫BANNED' if k['banned'] else '✅ACTIVE'}" for k in active_keys if k["creator_id"] == uid]
+        msg = f"📦 *Your Keys ({len(lines)})*\n\n" + "\n".join(lines) if lines else "You haven't generated any keys."
+        await update.message.reply_text(msg, reply_markup=reseller_keyboard(), parse_mode="Markdown")
+        return
+
+    if text == "➕ Add Reseller" and uid == OWNER_ID:
+        ctx.user_data["state"] = "waiting_reseller_id"
+        await update.message.reply_text("👤 *Send the Telegram User ID of the new Reseller:*", reply_markup=cancel_keyboard(), parse_mode="Markdown")
+        return
+
+    if state == "waiting_reseller_id" and uid == OWNER_ID:
+        if text.isdigit():
+            resellers.add(int(text))
+            ctx.user_data["state"] = "owner_panel"
+            await update.message.reply_text(f"✅ *Reseller {text} added successfully!*", reply_markup=owner_keyboard(), parse_mode="Markdown")
+        else:
+            await update.message.reply_text("❌ Invalid ID format.", reply_markup=cancel_keyboard())
+        return
+
+    if text == "🚫 Ban Key" and uid == OWNER_ID:
+        ctx.user_data["state"] = "waiting_ban_key"
+        await update.message.reply_text("🛑 *Send the Key you want to BAN:*", reply_markup=cancel_keyboard(), parse_mode="Markdown")
+        return
+
+    if state == "waiting_ban_key" and uid == OWNER_ID:
+        for k in active_keys:
+            if k["key"] == text:
+                k["banned"] = True
+                ctx.user_data["state"] = "owner_panel"
+                await update.message.reply_text(f"✅ *Key `{text}` has been BANNED.*", reply_markup=owner_keyboard(), parse_mode="Markdown")
+                return
+        await update.message.reply_text("❌ Key not found.", reply_markup=owner_keyboard())
+        ctx.user_data["state"] = "owner_panel"
+        return
+
+    if text == "🗑 Delete All Keys" and uid == OWNER_ID:
+        active_keys.clear()
+        used_keys.clear()
+        await update.message.reply_text("🗑 *All keys deleted.*", reply_markup=owner_keyboard(), parse_mode="Markdown")
+        return
+
+    # ── Key Activation Process ──
+    if state == "waiting_key":
+        clean_expired_keys()
+        key_entry = next((k for k in active_keys if k["key"] == text), None)
+        
+        if not key_entry:
+            used_entry = next((k for k in used_keys if k["key"] == text), None)
+            if used_entry:
+                await update.message.reply_text("⚠️ *This key has already been used.*", reply_markup=main_keyboard(), parse_mode="Markdown")
+            else:
+                await update.message.reply_text("❌ *Invalid or Expired Key.*", reply_markup=main_keyboard(), parse_mode="Markdown")
+            ctx.user_data["state"] = "menu"
+            return
+            
+        if key_entry.get("banned", False):
+            await update.message.reply_text("🚫 *This key has been BANNED by the Admin.*", reply_markup=main_keyboard(), parse_mode="Markdown")
+            ctx.user_data["state"] = "menu"
+            return
+
+        ctx.user_data["pending_key"] = text
+        ctx.user_data["state"] = "waiting_ip"
+        await update.message.reply_text("🌐 *Now send your public IP address:*", reply_markup=cancel_keyboard(), parse_mode="Markdown")
+        return
+
+    if state == "waiting_ip":
+        pending_key = ctx.user_data.get("pending_key")
+        clean_expired_keys()
+        key_entry = next((k for k in active_keys if k["key"] == pending_key), None)
+        
+        if not key_entry or key_entry.get("banned", False):
+            await update.message.reply_text("❌ *Key is no longer valid or banned.*", reply_markup=main_keyboard(), parse_mode="Markdown")
+            ctx.user_data["state"] = "menu"
+            return
+
+        active_keys.remove(key_entry)
+        used_keys.append({
+            "key": pending_key,
+            "user_id": uid,
+            "ip": text,
+            "activated_at": datetime.now(),
+            "expiry": key_entry["expiry"]
+        })
+
+        msg = (
+            "🟢 *Proxy Connected Successfully!*\n\n"
+            f"│ 🌐 IP: {text}\n"
+            f"│ ⏰ Expires: {key_entry['expiry'].strftime('%Y-%m-%d %H:%M')}\n"
+            "🔐 *Enjoy secure & fast browsing! 🚀*"
+        )
+        await update.message.reply_text(msg, reply_markup=main_keyboard(), parse_mode="Markdown")
+        ctx.user_data["state"] = "menu"
+        return
+
+def main():
+    print("🔥 MESTRAX Proxy Bot (Enhanced) Starting...")
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+if __name__ == "__main__":
+    main()
