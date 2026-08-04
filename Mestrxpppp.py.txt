@@ -1,0 +1,815 @@
+"""
+╔═══════════════════════════════════════════╗
+║   MESTRAX PROXY - Advanced Proxy Bot     ║
+║   Version 10.0 - Reseller System         ║
+╚═══════════════════════════════════════════╝
+"""
+
+import logging
+import random
+import string
+import threading
+import os
+import json
+from datetime import datetime, timedelta
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
+from flask import Flask
+
+# ── Flask Web Server ──
+app_flask = Flask('')
+
+@app_flask.route('/')
+def home():
+    return "✅ MESTRAX Proxy Bot is running!"
+
+@app_flask.route('/health')
+def health():
+    return "OK", 200
+
+def run_flask():
+    app_flask.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
+
+threading.Thread(target=run_flask, daemon=True).start()
+
+# ── Config ──
+BOT_TOKEN = "8793194323:AAFXiWIXDYCvwf0CKtI3t7gJT7wqvXi07oc"
+OWNER_ID = 8254258071
+OWNER_PASSWORD = "S4TEXXPROXY"
+KEY_LENGTH = 12
+
+# ── Data Storage ──
+DATA_FILE = "proxy_data.json"
+
+def load_data():
+    try:
+        with open(DATA_FILE, 'r') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {
+            "active_keys": [],
+            "used_keys": [],
+            "resellers": [],
+            "banned_keys": [],
+            "key_counter": 0
+        }
+
+def save_data(data):
+    with open(DATA_FILE, 'w') as f:
+        json.dump(data, f, default=str, indent=2)
+
+db = load_data()
+
+# ── Helper Functions ──
+def gen_key():
+    db["key_counter"] += 1
+    return "".join(random.choices(string.ascii_uppercase + string.digits, k=KEY_LENGTH))
+
+def clean_expired_keys():
+    now = datetime.now()
+    db["active_keys"] = [k for k in db["active_keys"] if datetime.fromisoformat(k["expiry"]) > now]
+    save_data(db)
+
+def is_key_banned(key):
+    return key in db["banned_keys"]
+
+def is_reseller(user_id):
+    return any(r["user_id"] == user_id for r in db["resellers"])
+
+def get_reseller(user_id):
+    for r in db["resellers"]:
+        if r["user_id"] == user_id:
+            return r
+    return None
+
+def format_key_info(key_data):
+    exp = datetime.fromisoformat(key_data["expiry"]).strftime("%Y-%m-%d %H:%M")
+    return f"`{key_data['key']}` – expires {exp}"
+
+# ── Messages ──
+WELCOME = (
+    "╔══════════════════════════════╗\n"
+    "║  🔥 MESTRAX PROXY SAFE      ║\n"
+    "║  Version 10.0               ║\n"
+    "╚══════════════════════════════╝\n\n"
+    "🌐 *PROXY ACTIVATION SYSTEM*\n\n"
+    "📌 Send your activation key to\n"
+    "   connect to our servers.\n\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    "📊 Server Status: 🟢 Online\n"
+    "👥 Active Users: {active_users}\n"
+    "📶 Speed: 150 Mbps\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    "⬇️ *Send your key below:*"
+)
+
+MAIN_MENU = (
+    "╔══════════════════════════════╗\n"
+    "║  🔥 MESTRAX PROXY SAFE      ║\n"
+    "║  Version 10.0               ║\n"
+    "╚══════════════════════════════╝\n\n"
+    "🌐 *Main Menu*\n\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    "📊 Server Status: 🟢 Online\n"
+    "👥 Active Users: {active_users}\n"
+    "📶 Speed: 150 Mbps\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    "Choose an option:"
+)
+
+CHECK_IP = (
+    "🌐 *IP Information*\n\n"
+    "Click the button below to check your public IP:\n\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    "🔒 Your connection is secured\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━"
+)
+
+STATS_MSG = (
+    "📊 *Server Statistics*\n\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    "🖥 Servers: Active\n"
+    "👤 Owner: @MESTRAXMODZ\n"
+    "📶 Channel: @MESTRAXMODS\n"
+    "🔒 Protocol: AES-256\n"
+    "⏱ Uptime: 99.9%\n"
+    "🌍 Locations: US, MOROCCO\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    "✅ All systems operational"
+)
+
+HELP_MSG = (
+    "📖 *How to Use*\n\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    "📌 *Step 1:*\n"
+    "   Get an activation key\n"
+    "   from our admin/reseller.\n\n"
+    "📌 *Step 2:*\n"
+    "   Click 'Activate Key'\n"
+    "   and send your key.\n\n"
+    "📌 *Step 3:*\n"
+    "   Then send your public IP\n"
+    "   (use the 'Check My IP' button).\n\n"
+    "📌 *Step 4:*\n"
+    "   Wait for verification.\n\n"
+    "📌 *Step 5:*\n"
+    "   Your proxy will be\n"
+    "   connected automatically.\n\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    "💡 Need help? Contact admin:\n"
+    "   👤 @MESTRAXMODZ"
+)
+
+SUCCESS_MSG = (
+    "╔══════════════════════════════╗\n"
+    "║      ✅ VERIFIED             ║\n"
+    "╚══════════════════════════════╝\n\n"
+    "🟢 *Proxy Connected Successfully!*\n\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    "│ ✅ Status    : Connected     │\n"
+    "│ 🌐 Proxy     : MESTRAX-ULTRA │\n"
+    "│ 📶 Signal    : Strong        │\n"
+    "│ 🔒 Encryption: AES-256       │\n"
+    "│ ⏱ Ping      : 8ms           │\n"
+    "│ 🌍 Server    : 155.117.40.185│\n"
+    "│ 📶 PORT      : 10056         │\n"
+    "│ ⏰ Expires   : {expires}     │\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    "🔐 *Your proxy is now active.*\n"
+    "Enjoy secure & fast browsing! 🚀"
+)
+
+FAILED_MSG = (
+    "╔══════════════════════════════╗\n"
+    "║      ❌ FAILED               ║\n"
+    "╚══════════════════════════════╝\n\n"
+    "🔴 *Verification Failed!*\n\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    "│ ❌ Status   : Rejected      │\n"
+    "│ 🔑 Key      : Invalid       │\n"
+    "│ 🚫 Access   : Denied        │\n"
+    "│ 📋 Reason   : {reason}      │\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    "💡 *Contact Owner: @MESTRAXMODZ*"
+)
+
+USED_MSG = (
+    "╔══════════════════════════════╗\n"
+    "║    ⚠️ ALREADY USED            ║\n"
+    "╚══════════════════════════════╝\n\n"
+    "🟡 *This key has already been used.*\n\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    "│ ⚠️ Status   : Used           │\n"
+    "│ 👤 Used By  : Previous User  │\n"
+    "│ 🚫 Access   : Denied         │\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    "Each key can only be used once.\n\n"
+    "💡 *Contact admin: @MESTRAXMODZ TO BUY KEY*"
+)
+
+BANNED_MSG = (
+    "╔══════════════════════════════╗\n"
+    "║      🚫 BANNED               ║\n"
+    "╚══════════════════════════════╝\n\n"
+    "🔴 *This key has been banned!*\n\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    "│ 🚫 Status   : Banned        │\n"
+    "│ 🔑 Key      : Invalid       │\n"
+    "│ 🚫 Access   : Denied        │\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    "💡 *Contact Owner: @MESTRAXMODZ*"
+)
+
+ASK_KEY = "⬇️ *Send your activation key now:*\n\n🔑 Type your key below:"
+ASK_IP = "🌐 *Now send your public IP address*\n\nYou can get it by clicking the 'Check My IP' button below.\n\n📌 Type your IP in the chat:"
+ASK_PASSWORD = "🔒 *Admin Access*\n\nSend the password:"
+ASK_DURATION = "⏳ *Choose key duration:*"
+ASK_KEY_COUNT = "🔢 *How many keys to generate?*\n\nSend a number (1-1000):"
+ASK_RESELLER_ID = "👤 *Enter the Telegram ID of the new Reseller:*\n\nExample: 123456789"
+ASK_RESELLER_NAME = "📝 *Enter a name for the Reseller:*"
+
+# ── Keyboards ──
+def main_keyboard(active_users=0):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔑 Activate Key", callback_data="activate")],
+        [InlineKeyboardButton("🌐 Check My IP", callback_data="check_ip")],
+        [InlineKeyboardButton("📊 Server Stats", callback_data="stats")],
+        [InlineKeyboardButton("📖 How to Use", callback_data="help")],
+        [InlineKeyboardButton("👤 Contact Owner", url="https://t.me/MESTRAXMODZ")],
+        [InlineKeyboardButton("🔐 Admin Panel", callback_data="ask_pass")],
+    ])
+
+def back_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔙 Back to Menu", callback_data="main_menu")],
+    ])
+
+def admin_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔑 Generate Keys", callback_data="gen_keys")],
+        [InlineKeyboardButton("👥 Manage Resellers", callback_data="manage_resellers")],
+        [InlineKeyboardButton("📦 View All Keys", callback_data="view_keys")],
+        [InlineKeyboardButton("🚫 Ban Key", callback_data="ban_key")],
+        [InlineKeyboardButton("🔓 Unban Key", callback_data="unban_key")],
+        [InlineKeyboardButton("🗑 Delete All Keys", callback_data="del_keys")],
+        [InlineKeyboardButton("📊 Reseller Stats", callback_data="reseller_stats")],
+        [InlineKeyboardButton("🔙 Back to Menu", callback_data="main_menu")],
+    ])
+
+def reseller_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔑 Generate Keys", callback_data="reseller_gen_keys")],
+        [InlineKeyboardButton("📦 View My Keys", callback_data="reseller_view_keys")],
+        [InlineKeyboardButton("📊 My Stats", callback_data="reseller_stats")],
+        [InlineKeyboardButton("🔙 Back to Menu", callback_data="main_menu")],
+    ])
+
+def duration_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("1 Day", callback_data="dur_1")],
+        [InlineKeyboardButton("7 Days", callback_data="dur_7")],
+        [InlineKeyboardButton("30 Days", callback_data="dur_30")],
+        [InlineKeyboardButton("365 Days", callback_data="dur_365")],
+        [InlineKeyboardButton("🔙 Cancel", callback_data="main_menu")],
+    ])
+
+def gen_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔑 Generate More", callback_data="gen_keys")],
+        [InlineKeyboardButton("📦 View Keys", callback_data="view_keys")],
+        [InlineKeyboardButton("🗑 Delete All", callback_data="del_keys")],
+        [InlineKeyboardButton("🔙 Menu", callback_data="main_menu")],
+    ])
+
+def reseller_gen_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔑 Generate More", callback_data="reseller_gen_keys")],
+        [InlineKeyboardButton("📦 View My Keys", callback_data="reseller_view_keys")],
+        [InlineKeyboardButton("🔙 Menu", callback_data="main_menu")],
+    ])
+
+def manage_resellers_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ Add Reseller", callback_data="add_reseller")],
+        [InlineKeyboardButton("📋 List Resellers", callback_data="list_resellers")],
+        [InlineKeyboardButton("❌ Remove Reseller", callback_data="remove_reseller")],
+        [InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_panel")],
+    ])
+
+def reseller_list_keyboard(resellers):
+    keyboard = []
+    for r in resellers:
+        keyboard.append([InlineKeyboardButton(
+            f"👤 {r['name']} (ID: {r['user_id']})",
+            callback_data=f"reseller_info_{r['user_id']}"
+        )])
+    keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="manage_resellers")])
+    return InlineKeyboardMarkup(keyboard)
+
+def cancel_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("❌ Cancel", callback_data="main_menu")],
+    ])
+
+# ── Handlers ──
+async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    clean_expired_keys()
+    active_users = len(db["active_keys"])
+    welcome_text = WELCOME.format(active_users=active_users)
+    await update.message.reply_text(welcome_text, reply_markup=main_keyboard(active_users), parse_mode="Markdown")
+
+async def admin_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("⛔ Access denied.", parse_mode="Markdown")
+        return
+    await update.message.reply_text(
+        "🔐 *Admin Panel - MESTRAX Proxy*\n\nChoose action:",
+        reply_markup=admin_keyboard(),
+        parse_mode="Markdown",
+    )
+
+async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    data = query.data
+
+    if data == "main_menu":
+        active_users = len(db["active_keys"])
+        menu_text = MAIN_MENU.format(active_users=active_users)
+        await query.edit_message_text(menu_text, reply_markup=main_keyboard(active_users), parse_mode="Markdown")
+        ctx.user_data["state"] = "menu"
+
+    elif data == "activate":
+        await query.edit_message_text(ASK_KEY, reply_markup=back_keyboard(), parse_mode="Markdown")
+        ctx.user_data["state"] = "waiting_key"
+
+    elif data == "check_ip":
+        await query.edit_message_text(
+            CHECK_IP,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔗 Show My IP", url="https://api.ipify.org?format=json")],
+                [InlineKeyboardButton("🔙 Back", callback_data="main_menu")],
+            ]),
+            parse_mode="Markdown"
+        )
+
+    elif data == "stats":
+        await query.edit_message_text(STATS_MSG, reply_markup=back_keyboard(), parse_mode="Markdown")
+
+    elif data == "help":
+        await query.edit_message_text(HELP_MSG, reply_markup=back_keyboard(), parse_mode="Markdown")
+
+    elif data == "ask_pass":
+        await query.edit_message_text(ASK_PASSWORD, reply_markup=back_keyboard(), parse_mode="Markdown")
+        ctx.user_data["state"] = "waiting_pass"
+
+    elif data == "admin_panel":
+        await query.edit_message_text(
+            "🔐 *Admin Panel - MESTRAX Proxy*\n\nChoose action:",
+            reply_markup=admin_keyboard(),
+            parse_mode="Markdown",
+        )
+
+    elif data == "gen_keys":
+        if uid != OWNER_ID:
+            await query.answer("⛔ Not authorized!", show_alert=True)
+            return
+        await query.edit_message_text(ASK_KEY_COUNT, reply_markup=cancel_keyboard(), parse_mode="Markdown")
+        ctx.user_data["state"] = "waiting_key_count"
+
+    elif data == "manage_resellers":
+        if uid != OWNER_ID:
+            await query.answer("⛔ Not authorized!", show_alert=True)
+            return
+        await query.edit_message_text(
+            "👥 *Manage Resellers*\n\nChoose an option:",
+            reply_markup=manage_resellers_keyboard(),
+            parse_mode="Markdown"
+        )
+
+    elif data == "add_reseller":
+        if uid != OWNER_ID:
+            await query.answer("⛔ Not authorized!", show_alert=True)
+            return
+        await query.edit_message_text(ASK_RESELLER_ID, reply_markup=cancel_keyboard(), parse_mode="Markdown")
+        ctx.user_data["state"] = "waiting_reseller_id"
+
+    elif data == "list_resellers":
+        if uid != OWNER_ID:
+            await query.answer("⛔ Not authorized!", show_alert=True)
+            return
+        if not db["resellers"]:
+            await query.edit_message_text(
+                "📋 *No resellers registered.*",
+                reply_markup=manage_resellers_keyboard(),
+                parse_mode="Markdown"
+            )
+        else:
+            await query.edit_message_text(
+                "📋 *List of Resellers:*\n\nSelect a reseller for details:",
+                reply_markup=reseller_list_keyboard(db["resellers"]),
+                parse_mode="Markdown"
+            )
+
+    elif data.startswith("reseller_info_"):
+        if uid != OWNER_ID:
+            await query.answer("⛔ Not authorized!", show_alert=True)
+            return
+        reseller_id = int(data.split("_")[2])
+        reseller = get_reseller(reseller_id)
+        if not reseller:
+            await query.edit_message_text(
+                "❌ Reseller not found.",
+                reply_markup=manage_resellers_keyboard(),
+                parse_mode="Markdown"
+            )
+            return
+        keys_generated = reseller.get("keys_generated", 0)
+        keys_used = reseller.get("keys_used", 0)
+        await query.edit_message_text(
+            f"👤 *Reseller Details*\n\n"
+            f"📝 Name: {reseller['name']}\n"
+            f"🆔 ID: {reseller['user_id']}\n"
+            f"📊 Keys Generated: {keys_generated}\n"
+            f"📦 Keys Used: {keys_used}\n"
+            f"📈 Total: {keys_generated + keys_used}",
+            reply_markup=manage_resellers_keyboard(),
+            parse_mode="Markdown"
+        )
+
+    elif data == "remove_reseller":
+        if uid != OWNER_ID:
+            await query.answer("⛔ Not authorized!", show_alert=True)
+            return
+        if not db["resellers"]:
+            await query.edit_message_text(
+                "📋 *No resellers to remove.*",
+                reply_markup=manage_resellers_keyboard(),
+                parse_mode="Markdown"
+            )
+            return
+        keyboard = []
+        for r in db["resellers"]:
+            keyboard.append([InlineKeyboardButton(
+                f"❌ {r['name']} (ID: {r['user_id']})",
+                callback_data=f"remove_reseller_{r['user_id']}"
+            )])
+        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="manage_resellers")])
+        await query.edit_message_text(
+            "❌ *Select a reseller to remove:*",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+
+    elif data.startswith("remove_reseller_"):
+        if uid != OWNER_ID:
+            await query.answer("⛔ Not authorized!", show_alert=True)
+            return
+        reseller_id = int(data.split("_")[2])
+        db["resellers"] = [r for r in db["resellers"] if r["user_id"] != reseller_id]
+        save_data(db)
+        await query.edit_message_text(
+            "✅ *Reseller removed successfully!*",
+            reply_markup=manage_resellers_keyboard(),
+            parse_mode="Markdown"
+        )
+
+    elif data == "view_keys":
+        if uid != OWNER_ID:
+            await query.answer("⛔ Not authorized!", show_alert=True)
+            return
+        clean_expired_keys()
+        if not db["active_keys"]:
+            msg = "📦 *No active keys.*\n\nGenerate new keys first."
+        else:
+            lines = []
+            for idx, k in enumerate(db["active_keys"][:50], 1):
+                lines.append(f"{idx}. {format_key_info(k)}")
+            msg = f"📦 *Active Keys ({len(db['active_keys'])} total)*\n\n" + "\n".join(lines)
+            if len(db["active_keys"]) > 50:
+                msg += f"\n\n... and {len(db['active_keys']) - 50} more"
+        await query.edit_message_text(msg, reply_markup=admin_keyboard(), parse_mode="Markdown")
+
+    elif data == "ban_key":
+        if uid != OWNER_ID:
+            await query.answer("⛔ Not authorized!", show_alert=True)
+            return
+        await query.edit_message_text(
+            "🚫 *Enter the key to ban:*\n\nType the key in the chat:",
+            reply_markup=cancel_keyboard(),
+            parse_mode="Markdown"
+        )
+        ctx.user_data["state"] = "waiting_ban_key"
+
+    elif data == "unban_key":
+        if uid != OWNER_ID:
+            await query.answer("⛔ Not authorized!", show_alert=True)
+            return
+        if not db["banned_keys"]:
+            await query.edit_message_text(
+                "📋 *No banned keys.*",
+                reply_markup=admin_keyboard(),
+                parse_mode="Markdown"
+            )
+            return
+        keyboard = []
+        for key in db["banned_keys"][:20]:
+            keyboard.append([InlineKeyboardButton(
+                f"🔓 {key}",
+                callback_data=f"unban_{key}"
+            )])
+        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="admin_panel")])
+        await query.edit_message_text(
+            "🔓 *Select a key to unban:*",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+
+    elif data.startswith("unban_"):
+        if uid != OWNER_ID:
+            await query.answer("⛔ Not authorized!", show_alert=True)
+            return
+        key = data.split("_", 1)[1]
+        if key in db["banned_keys"]:
+            db["banned_keys"].remove(key)
+            save_data(db)
+            await query.edit_message_text(
+                f"✅ *Key unbanned successfully!*\n\n`{key}`",
+                reply_markup=admin_keyboard(),
+                parse_mode="Markdown"
+            )
+        else:
+            await query.edit_message_text(
+                "❌ Key not found in banned list.",
+                reply_markup=admin_keyboard(),
+                parse_mode="Markdown"
+            )
+
+    elif data == "del_keys":
+        if uid != OWNER_ID:
+            await query.answer("⛔ Not authorized!", show_alert=True)
+            return
+        db["active_keys"].clear()
+        save_data(db)
+        await query.edit_message_text(
+            "🗑 *All keys deleted.*",
+            reply_markup=admin_keyboard(),
+            parse_mode="Markdown",
+        )
+
+    elif data == "reseller_stats":
+        if uid != OWNER_ID:
+            await query.answer("⛔ Not authorized!", show_alert=True)
+            return
+        if not db["resellers"]:
+            await query.edit_message_text(
+                "📊 *No resellers registered.*",
+                reply_markup=admin_keyboard(),
+                parse_mode="Markdown"
+            )
+            return
+        msg = "📊 *Reseller Statistics*\n\n"
+        for r in db["resellers"]:
+            keys_gen = r.get("keys_generated", 0)
+            keys_used = r.get("keys_used", 0)
+            msg += f"👤 {r['name']} (ID: {r['user_id']})\n"
+            msg += f"   📊 Generated: {keys_gen}\n"
+            msg += f"   📦 Used: {keys_used}\n\n"
+        await query.edit_message_text(msg, reply_markup=admin_keyboard(), parse_mode="Markdown")
+
+    elif data.startswith("reseller_"):
+        if not is_reseller(uid):
+            await query.answer("⛔ Access denied! You are not a reseller.", show_alert=True)
+            return
+        reseller = get_reseller(uid)
+        
+        if data == "reseller_gen_keys":
+            await query.edit_message_text(ASK_KEY_COUNT, reply_markup=cancel_keyboard(), parse_mode="Markdown")
+            ctx.user_data["state"] = "reseller_waiting_key_count"
+            ctx.user_data["reseller_id"] = uid
+
+        elif data == "reseller_view_keys":
+            clean_expired_keys()
+            reseller_keys = [k for k in db["active_keys"] if k.get("generated_by") == uid]
+            if not reseller_keys:
+                msg = "📦 *No active keys.*\n\nGenerate new keys first."
+            else:
+                lines = []
+                for idx, k in enumerate(reseller_keys[:50], 1):
+                    lines.append(f"{idx}. {format_key_info(k)}")
+                msg = f"📦 *Your Active Keys ({len(reseller_keys)} total)*\n\n" + "\n".join(lines)
+                if len(reseller_keys) > 50:
+                    msg += f"\n\n... and {len(reseller_keys) - 50} more"
+            await query.edit_message_text(msg, reply_markup=reseller_keyboard(), parse_mode="Markdown")
+
+        elif data == "reseller_stats":
+            msg = f"📊 *Reseller Stats*\n\n"
+            msg += f"👤 Name: {reseller['name']}\n"
+            msg += f"🆔 ID: {reseller['user_id']}\n"
+            msg += f"📊 Keys Generated: {reseller.get('keys_generated', 0)}\n"
+            msg += f"📦 Keys Used: {reseller.get('keys_used', 0)}\n"
+            msg += f"📈 Total: {reseller.get('keys_generated', 0) + reseller.get('keys_used', 0)}"
+            await query.edit_message_text(msg, reply_markup=reseller_keyboard(), parse_mode="Markdown")
+
+    elif data.startswith("dur_"):
+        if uid != OWNER_ID and not is_reseller(uid):
+            await query.answer("⛔ Not authorized!", show_alert=True)
+            return
+        days = int(data.split("_")[1])
+        count = ctx.user_data.get("key_count", 1)
+        generated_keys = []
+        
+        for _ in range(count):
+            key = gen_key()
+            expiry = datetime.now() + timedelta(days=days)
+            key_data = {
+                "key": key,
+                "expiry": expiry.isoformat(),
+                "duration": f"{days} days",
+                "generated_by": uid
+            }
+            db["active_keys"].append(key_data)
+            generated_keys.append(key)
+        
+        if is_reseller(uid):
+            reseller = get_reseller(uid)
+            reseller["keys_generated"] = reseller.get("keys_generated", 0) + count
+            save_data(db)
+        
+        save_data(db)
+        
+        keys_display = "\n".join([f"`{k}`" for k in generated_keys[:10]])
+        if len(generated_keys) > 10:
+            keys_display += f"\n... and {len(generated_keys) - 10} more"
+        
+        await query.edit_message_text(
+            f"🔑 *{count} Key(s) Generated!*\n\n"
+            f"{keys_display}\n\n"
+            f"⏳ Expires: {(datetime.now() + timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"📅 Duration: {days} days\n\n"
+            f"📊 Active: {len(db['active_keys'])} | Used: {len(db['used_keys'])}",
+            reply_markup=gen_keyboard() if uid == OWNER_ID else reseller_gen_keyboard(),
+            parse_mode="Markdown",
+        )
+        ctx.user_data["state"] = "owner" if uid == OWNER_ID else "reseller"
+
+    elif data == "cancel":
+        await query.edit_message_text(
+            "❌ Operation cancelled.",
+            reply_markup=main_keyboard(len(db["active_keys"])),
+            parse_mode="Markdown"
+        )
+        ctx.user_data["state"] = "menu"
+
+
+async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    state = ctx.user_data.get("state", "menu")
+    uid = update.effective_user.id
+    text = update.message.text.strip()
+
+    if state == "waiting_pass":
+        if text == OWNER_PASSWORD and uid == OWNER_ID:
+            await update.message.reply_text(
+                "✅ *Access Granted*\n\n🔐 Admin Panel:",
+                reply_markup=admin_keyboard(),
+                parse_mode="Markdown",
+            )
+            ctx.user_data["state"] = "owner"
+        else:
+            await update.message.reply_text(
+                "❌ *Wrong password.*",
+                reply_markup=main_keyboard(len(db["active_keys"])),
+                parse_mode="Markdown",
+            )
+            ctx.user_data["state"] = "menu"
+        return
+
+    if state == "waiting_key_count":
+        if uid != OWNER_ID:
+            await update.message.reply_text("⛔ Not authorized!")
+            return
+        try:
+            count = int(text)
+            if count < 1 or count > 1000:
+                await update.message.reply_text(
+                    "❌ *Invalid number.* Please enter a number between 1 and 1000.",
+                    parse_mode="Markdown"
+                )
+                return
+            ctx.user_data["key_count"] = count
+            await update.message.reply_text(
+                ASK_DURATION,
+                reply_markup=duration_keyboard(),
+                parse_mode="Markdown"
+            )
+            ctx.user_data["state"] = "waiting_duration"
+        except ValueError:
+            await update.message.reply_text(
+                "❌ *Invalid input.* Please enter a number.",
+                parse_mode="Markdown"
+            )
+        return
+
+    if state == "reseller_waiting_key_count":
+        if not is_reseller(uid):
+            await update.message.reply_text("⛔ Access denied!")
+            return
+        try:
+            count = int(text)
+            if count < 1 or count > 1000:
+                await update.message.reply_text(
+                    "❌ *Invalid number.* Please enter a number between 1 and 1000.",
+                    parse_mode="Markdown"
+                )
+                return
+            ctx.user_data["key_count"] = count
+            await update.message.reply_text(
+                ASK_DURATION,
+                reply_markup=duration_keyboard(),
+                parse_mode="Markdown"
+            )
+            ctx.user_data["state"] = "reseller_waiting_duration"
+        except ValueError:
+            await update.message.reply_text(
+                "❌ *Invalid input.* Please enter a number.",
+                parse_mode="Markdown"
+            )
+        return
+
+    if state == "waiting_reseller_id":
+        if uid != OWNER_ID:
+            await update.message.reply_text("⛔ Not authorized!")
+            return
+        try:
+            reseller_id = int(text)
+            if get_reseller(reseller_id):
+                await update.message.reply_text(
+                    "❌ *This user is already a reseller.*",
+                    parse_mode="Markdown"
+                )
+                return
+            ctx.user_data["new_reseller_id"] = reseller_id
+            await update.message.reply_text(
+                ASK_RESELLER_NAME,
+                reply_markup=cancel_keyboard(),
+                parse_mode="Markdown"
+            )
+            ctx.user_data["state"] = "waiting_reseller_name"
+        except ValueError:
+            await update.message.reply_text(
+                "❌ *Invalid ID.* Please enter a valid Telegram ID (numbers only).",
+                parse_mode="Markdown"
+            )
+        return
+
+    if state == "waiting_reseller_name":
+        if uid != OWNER_ID:
+            await update.message.reply_text("⛔ Not authorized!")
+            return
+        name = text.strip()
+        reseller_id = ctx.user_data.get("new_reseller_id")
+        if not reseller_id:
+            await update.message.reply_text(
+                "❌ *Session expired. Please try again.*",
+                parse_mode="Markdown"
+            )
+            ctx.user_data["state"] = "menu"
+            return
+        
+        db["resellers"].append({
+            "user_id": reseller_id,
+            "name": name,
+            "keys_generated": 0,
+            "keys_used": 0
+        })
+        save_data(db)
+        
+        await update.message.reply_text(
+            f"✅ *Reseller Added Successfully!*\n\n"
+            f"👤 ID: {reseller_id}\n"
+            f"📝 Name: {name}\n"
+            f"📊 Keys Generated: 0\n"
+            f"📦 Used Keys: 0",
+            reply_markup=manage_resellers_keyboard(),
+            parse_mode="Markdown"
+        )
+        ctx.user_data["state"] = "owner"
+        return
+
+    if state == "waiting_ban_key":
+        if uid != OWNER_ID:
+            await update.message.reply_text("⛔ Not authorized!")
+            return
+        key = text.strip()
+        if key in db["banned_keys"]:
+            await update.message.reply_text(
+                f"⚠️ *Key already banned!*\n\n`{key}`",
+                reply_markup=admin_key
