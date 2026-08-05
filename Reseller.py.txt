@@ -1,0 +1,200 @@
+import telebot
+from telebot import types
+from flask import Flask, request
+import sqlite3
+
+# ================= إعدادات البوت =================
+TOKEN = '8686469540:AAF0iqpRNhZ2Ihb4rsYw1i6q0NdpICpaS8I' # توكن البوت الخاص بك
+ADMIN_ID = 8254258071 # الآيدي الخاص بك كأدمن
+WEBHOOK_URL = 'https://Asset-Manager.aminesafe0.repl.co/' # ضع رابط Render أو Replit هنا
+
+bot = telebot.TeleBot(TOKEN)
+app = Flask(__name__)
+
+# ================= إعداد قاعدة البيانات =================
+def init_db():
+    conn = sqlite3.connect('store.db', check_same_thread=False)
+    c = conn.cursor()
+    # جدول الحسابات (المستخدمين المسموح لهم بالدخول)
+    c.execute('''CREATE TABLE IF NOT EXISTS accounts 
+                 (username TEXT PRIMARY KEY, password TEXT, telegram_id INTEGER, balance REAL DEFAULT 0.0)''')
+    # الجداول الأساسية للمتجر
+    c.execute('''CREATE TABLE IF NOT EXISTS categories (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS products (id INTEGER PRIMARY KEY AUTOINCREMENT, cat_id INTEGER, name TEXT, price REAL)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS stock (id INTEGER PRIMARY KEY AUTOINCREMENT, prod_id INTEGER, key_data TEXT)''')
+    conn.commit()
+    conn.close()
+
+init_db()
+
+def execute_query(query, params=()):
+    conn = sqlite3.connect('store.db', check_same_thread=False)
+    c = conn.cursor()
+    c.execute(query, params)
+    conn.commit()
+    conn.close()
+
+def fetch_query(query, params=()):
+    conn = sqlite3.connect('store.db', check_same_thread=False)
+    c = conn.cursor()
+    c.execute(query, params)
+    result = c.fetchall()
+    conn.close()
+    return result
+
+def is_logged_in(telegram_id):
+    result = fetch_query("SELECT username FROM accounts WHERE telegram_id=?", (telegram_id,))
+    return True if result else False
+
+# ================= لوحات المفاتيح =================
+def main_menu(is_admin=False):
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    markup.add(
+        types.KeyboardButton('🛒 Buy Keys'),
+        types.KeyboardButton('👤 Profile'),
+        types.KeyboardButton('💰 Deposit'),
+        types.KeyboardButton('🔒 Logout')
+    )
+    if is_admin:
+        markup.add(types.KeyboardButton('🛠 ADMIN PANEL'))
+    return markup
+
+def admin_panel_markup():
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("➕ Create Login", callback_data="admin_create_login"),
+        types.InlineKeyboardButton("❌ Delete Login", callback_data="admin_delete_login"),
+        types.InlineKeyboardButton("👥 View Logins", callback_data="admin_view_logins"),
+        types.InlineKeyboardButton("💵 Add Balance", callback_data="admin_add_bal")
+    )
+    return markup
+
+# ================= أوامر البوت (تسجيل الدخول) =================
+@bot.message_handler(commands=['start'])
+def start_msg(message):
+    if is_logged_in(message.chat.id):
+        is_admin = (message.chat.id == ADMIN_ID)
+        bot.send_message(message.chat.id, "👋 Hello, welcome back to the panel!", reply_markup=main_menu(is_admin))
+    else:
+        msg = bot.send_message(message.chat.id, "🔒 **Login Required!**\nPlease enter your `Username`:", parse_mode="Markdown", reply_markup=types.ReplyKeyboardRemove())
+        bot.register_next_step_handler(msg, process_username)
+
+def process_username(message):
+    username = message.text
+    msg = bot.send_message(message.chat.id, "🔑 Now, enter your `Password`:", parse_mode="Markdown")
+    bot.register_next_step_handler(msg, lambda m: process_password(m, username))
+
+def process_password(message, username):
+    password = message.text
+    # التحقق من وجود الحساب
+    account = fetch_query("SELECT * FROM accounts WHERE username=? AND password=?", (username, password))
+    
+    if account:
+        # ربط الحساب بآيدي التلجرام
+        execute_query("UPDATE accounts SET telegram_id=? WHERE username=?", (message.chat.id, username))
+        is_admin = (message.chat.id == ADMIN_ID)
+        bot.send_message(message.chat.id, "✅ **Login Successful!** Welcome.", parse_mode="Markdown", reply_markup=main_menu(is_admin))
+    else:
+        bot.send_message(message.chat.id, "❌ **Invalid Username or Password.** Type /start to try again.", parse_mode="Markdown")
+
+@bot.message_handler(func=lambda message: message.text == '🔒 Logout')
+def logout_msg(message):
+    if is_logged_in(message.chat.id):
+        execute_query("UPDATE accounts SET telegram_id=NULL WHERE telegram_id=?", (message.chat.id,))
+        bot.send_message(message.chat.id, "🔒 You have successfully logged out.\nTo log in again, use /start", reply_markup=types.ReplyKeyboardRemove())
+
+# ================= تفاعل المستخدم الأساسي =================
+@bot.message_handler(func=lambda message: message.text == '👤 Profile')
+def profile_msg(message):
+    if not is_logged_in(message.chat.id): return
+    user = fetch_query("SELECT username, balance FROM accounts WHERE telegram_id=?", (message.chat.id,))
+    if user:
+        text = f"👤 **Your Account:**\n- Login: `{user[0][0]}`\n- Balance: **${user[0][1]}**"
+        bot.send_message(message.chat.id, text, parse_mode="Markdown")
+
+@bot.message_handler(func=lambda message: message.text == '🛠 ADMIN PANEL')
+def admin_panel(message):
+    if message.chat.id == ADMIN_ID:
+        bot.send_message(message.chat.id, "⚙️ **Admin Control Panel:**", reply_markup=admin_panel_markup(), parse_mode="Markdown")
+
+# ================= الكول باك الشفاف (لوحة الأدمن) =================
+@bot.callback_query_handler(func=lambda call: True)
+def handle_query(call):
+    if call.message.chat.id != ADMIN_ID: return # حماية إضافية للوحة التحكم
+    
+    if call.data == "admin_create_login":
+        msg = bot.send_message(call.message.chat.id, "Enter new login (Format: `Username Password`):", parse_mode="Markdown")
+        bot.register_next_step_handler(msg, process_create_login)
+        
+    elif call.data == "admin_delete_login":
+        msg = bot.send_message(call.message.chat.id, "Enter the `Username` you want to delete:", parse_mode="Markdown")
+        bot.register_next_step_handler(msg, process_delete_login)
+        
+    elif call.data == "admin_view_logins":
+        accounts = fetch_query("SELECT username, password, balance FROM accounts")
+        if accounts:
+            text = "👥 **All Accounts:**\n\n"
+            for acc in accounts:
+                text += f"- User: `{acc[0]}` | Pass: `{acc[1]}` | Bal: ${acc[2]}\n"
+        else:
+            text = "No accounts found."
+        bot.send_message(call.message.chat.id, text, parse_mode="Markdown")
+        
+    elif call.data == "admin_add_bal":
+        msg = bot.send_message(call.message.chat.id, "Enter Username and Amount (Format: `Username 15.5`):", parse_mode="Markdown")
+        bot.register_next_step_handler(msg, process_add_balance)
+
+# ================= دوال الأدمن (Next Step Handlers) =================
+def process_create_login(message):
+    try:
+        username, password = message.text.split()
+        execute_query("INSERT INTO accounts (username, password) VALUES (?, ?)", (username, password))
+        bot.send_message(message.chat.id, f"✅ Account Created Successfully!\n- Username: `{username}`\n- Password: `{password}`", parse_mode="Markdown")
+    except sqlite3.IntegrityError:
+        bot.send_message(message.chat.id, "❌ Error: Username already exists.")
+    except ValueError:
+        bot.send_message(message.chat.id, "❌ Error: Format must be `Username Password`.", parse_mode="Markdown")
+
+def process_delete_login(message):
+    username = message.text
+    execute_query("DELETE FROM accounts WHERE username=?", (username,))
+    bot.send_message(message.chat.id, f"✅ Account `{username}` has been deleted.", parse_mode="Markdown")
+
+def process_add_balance(message):
+    try:
+        username, amount = message.text.split()
+        amount = float(amount)
+        current = fetch_query("SELECT balance, telegram_id FROM accounts WHERE username=?", (username,))
+        if current:
+            new_bal = current[0][0] + amount
+            telegram_id = current[0][1]
+            execute_query("UPDATE accounts SET balance=? WHERE username=?", (new_bal, username))
+            bot.send_message(message.chat.id, f"✅ Added ${amount} to {username}. New Balance: ${new_bal}")
+            if telegram_id:
+                bot.send_message(telegram_id, f"💰 Your account balance has been credited with **${amount}**.", parse_mode="Markdown")
+        else:
+            bot.send_message(message.chat.id, "❌ Account not found.")
+    except Exception:
+        bot.send_message(message.chat.id, "❌ Error. Format: `Username 15.5`", parse_mode="Markdown")
+
+# ================= مسارات Flask (Webhooks) =================
+@app.route('/', methods=['POST'])
+def webhook():
+    if request.headers.get('content-type') == 'application/json':
+        json_string = request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_string)
+        bot.process_new_updates([update])
+        return 'ok', 200
+    else:
+        return 'error', 403
+
+@app.route('/ping', methods=['GET'])
+def ping():
+    return 'Bot is alive!', 200
+
+# ================= تهيئة الويب هوك والتشغيل =================
+if __name__ == '__main__':
+    bot.remove_webhook()
+    bot.set_webhook(url=WEBHOOK_URL)
+    print("Webhook is set. Server running on Port 8080...")
+    app.run(host='0.0.0.0', port=8080)
