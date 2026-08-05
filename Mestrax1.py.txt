@@ -1,0 +1,583 @@
+import telebot
+from telebot import types
+from flask import Flask, request, jsonify, render_template_string
+import sqlite3
+import datetime
+import os
+import threading
+import time
+import sys
+
+# ================= إعدادات البوت =================
+TOKEN = '8686469540:AAF0iqpRNhZ2Ihb4rsYw1i6q0NdpICpaS8I' # توكن البوت الخاص بك
+ADMIN_ID = 8254258071 # الآيدي الخاص بك كأدمن
+
+# التحقق من وجود التوكن
+if not TOKEN or TOKEN == 'YOUR_BOT_TOKEN_HERE':
+    print("❌ خطأ: يرجى وضع توكن البوت الصحيح في المتغير TOKEN")
+    sys.exit(1)
+
+bot = telebot.TeleBot(TOKEN)
+app = Flask(__name__)
+
+# ================= إعداد قاعدة البيانات =================
+DB_PATH = '/opt/render/project/src/store.db'  # مسار محدد لـ Render
+
+def init_db():
+    try:
+        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        c = conn.cursor()
+        # جدول الحسابات (المستخدمين المسموح لهم بالدخول)
+        c.execute('''CREATE TABLE IF NOT EXISTS accounts 
+                     (username TEXT PRIMARY KEY, password TEXT, telegram_id INTEGER, balance REAL DEFAULT 0.0, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        # الجداول الأساسية للمتجر
+        c.execute('''CREATE TABLE IF NOT EXISTS categories (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS products (id INTEGER PRIMARY KEY AUTOINCREMENT, cat_id INTEGER, name TEXT, price REAL)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS stock (id INTEGER PRIMARY KEY AUTOINCREMENT, prod_id INTEGER, key_data TEXT, sold BOOLEAN DEFAULT 0, sold_to INTEGER)''')
+        # جدول للمعاملات
+        c.execute('''CREATE TABLE IF NOT EXISTS transactions 
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, amount REAL, type TEXT, timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        conn.commit()
+        conn.close()
+        print("✅ Database initialized successfully!")
+        return True
+    except Exception as e:
+        print(f"❌ Database initialization error: {e}")
+        return False
+
+# محاولة تهيئة قاعدة البيانات
+if not init_db():
+    print("⚠️ Warning: Could not initialize database. Continuing anyway...")
+
+def execute_query(query, params=()):
+    try:
+        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        c = conn.cursor()
+        c.execute(query, params)
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"❌ Query execution error: {e}")
+        return False
+
+def fetch_query(query, params=()):
+    try:
+        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        c = conn.cursor()
+        c.execute(query, params)
+        result = c.fetchall()
+        conn.close()
+        return result
+    except Exception as e:
+        print(f"❌ Fetch query error: {e}")
+        return []
+
+def is_logged_in(telegram_id):
+    result = fetch_query("SELECT username FROM accounts WHERE telegram_id=?", (telegram_id,))
+    return True if result else False
+
+# ================= لوحات المفاتيح =================
+def main_menu(is_admin=False):
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    markup.add(
+        types.KeyboardButton('🛒 Buy Keys'),
+        types.KeyboardButton('👤 Profile'),
+        types.KeyboardButton('💰 Deposit'),
+        types.KeyboardButton('🔒 Logout')
+    )
+    if is_admin:
+        markup.add(types.KeyboardButton('🛠 ADMIN PANEL'))
+    return markup
+
+def admin_panel_markup():
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("➕ Create Login", callback_data="admin_create_login"),
+        types.InlineKeyboardButton("❌ Delete Login", callback_data="admin_delete_login"),
+        types.InlineKeyboardButton("👥 View Logins", callback_data="admin_view_logins"),
+        types.InlineKeyboardButton("💵 Add Balance", callback_data="admin_add_bal")
+    )
+    return markup
+
+# ================= أوامر البوت (تسجيل الدخول) =================
+@bot.message_handler(commands=['start'])
+def start_msg(message):
+    try:
+        if is_logged_in(message.chat.id):
+            is_admin = (message.chat.id == ADMIN_ID)
+            bot.send_message(message.chat.id, "👋 Hello, welcome back to the panel!", reply_markup=main_menu(is_admin))
+        else:
+            msg = bot.send_message(message.chat.id, "🔒 **Login Required!**\nPlease enter your `Username`:", parse_mode="Markdown", reply_markup=types.ReplyKeyboardRemove())
+            bot.register_next_step_handler(msg, process_username)
+    except Exception as e:
+        print(f"❌ Error in start_msg: {e}")
+        bot.send_message(message.chat.id, "⚠️ An error occurred. Please try again.")
+
+def process_username(message):
+    try:
+        username = message.text
+        msg = bot.send_message(message.chat.id, "🔑 Now, enter your `Password`:", parse_mode="Markdown")
+        bot.register_next_step_handler(msg, lambda m: process_password(m, username))
+    except Exception as e:
+        print(f"❌ Error in process_username: {e}")
+
+def process_password(message, username):
+    try:
+        password = message.text
+        # التحقق من وجود الحساب
+        account = fetch_query("SELECT * FROM accounts WHERE username=? AND password=?", (username, password))
+        
+        if account:
+            # ربط الحساب بآيدي التلجرام
+            execute_query("UPDATE accounts SET telegram_id=? WHERE username=?", (message.chat.id, username))
+            is_admin = (message.chat.id == ADMIN_ID)
+            bot.send_message(message.chat.id, "✅ **Login Successful!** Welcome.", parse_mode="Markdown", reply_markup=main_menu(is_admin))
+        else:
+            bot.send_message(message.chat.id, "❌ **Invalid Username or Password.** Type /start to try again.", parse_mode="Markdown")
+    except Exception as e:
+        print(f"❌ Error in process_password: {e}")
+
+@bot.message_handler(func=lambda message: message.text == '🔒 Logout')
+def logout_msg(message):
+    try:
+        if is_logged_in(message.chat.id):
+            execute_query("UPDATE accounts SET telegram_id=NULL WHERE telegram_id=?", (message.chat.id,))
+            bot.send_message(message.chat.id, "🔒 You have successfully logged out.\nTo log in again, use /start", reply_markup=types.ReplyKeyboardRemove())
+    except Exception as e:
+        print(f"❌ Error in logout_msg: {e}")
+
+# ================= تفاعل المستخدم الأساسي =================
+@bot.message_handler(func=lambda message: message.text == '👤 Profile')
+def profile_msg(message):
+    try:
+        if not is_logged_in(message.chat.id): return
+        user = fetch_query("SELECT username, balance FROM accounts WHERE telegram_id=?", (message.chat.id,))
+        if user:
+            # حساب عدد المفاتيح المشتراة
+            keys_bought = fetch_query("SELECT COUNT(*) FROM stock WHERE sold_to=?", (message.chat.id,))
+            text = f"👤 **Your Account:**\n- Login: `{user[0][0]}`\n- Balance: **${user[0][1]}**\n- Keys Bought: {keys_bought[0][0] if keys_bought else 0}"
+            bot.send_message(message.chat.id, text, parse_mode="Markdown")
+    except Exception as e:
+        print(f"❌ Error in profile_msg: {e}")
+
+@bot.message_handler(func=lambda message: message.text == '🛒 Buy Keys')
+def buy_keys(message):
+    try:
+        if not is_logged_in(message.chat.id): return
+        # هنا يمكنك إضافة نظام شراء المفاتيح
+        bot.send_message(message.chat.id, "🛒 **Buy Keys Section**\nThis feature is under development.", parse_mode="Markdown")
+    except Exception as e:
+        print(f"❌ Error in buy_keys: {e}")
+
+@bot.message_handler(func=lambda message: message.text == '💰 Deposit')
+def deposit_msg(message):
+    try:
+        if not is_logged_in(message.chat.id): return
+        bot.send_message(message.chat.id, "💰 **Deposit Section**\nContact admin to deposit funds.", parse_mode="Markdown")
+    except Exception as e:
+        print(f"❌ Error in deposit_msg: {e}")
+
+@bot.message_handler(func=lambda message: message.text == '🛠 ADMIN PANEL')
+def admin_panel(message):
+    try:
+        if message.chat.id == ADMIN_ID:
+            bot.send_message(message.chat.id, "⚙️ **Admin Control Panel:**", reply_markup=admin_panel_markup(), parse_mode="Markdown")
+    except Exception as e:
+        print(f"❌ Error in admin_panel: {e}")
+
+# ================= الكول باك الشفاف (لوحة الأدمن) =================
+@bot.callback_query_handler(func=lambda call: True)
+def handle_query(call):
+    try:
+        if call.message.chat.id != ADMIN_ID: return # حماية إضافية للوحة التحكم
+        
+        if call.data == "admin_create_login":
+            msg = bot.send_message(call.message.chat.id, "Enter new login (Format: `Username Password`):", parse_mode="Markdown")
+            bot.register_next_step_handler(msg, process_create_login)
+            
+        elif call.data == "admin_delete_login":
+            msg = bot.send_message(call.message.chat.id, "Enter the `Username` you want to delete:", parse_mode="Markdown")
+            bot.register_next_step_handler(msg, process_delete_login)
+            
+        elif call.data == "admin_view_logins":
+            accounts = fetch_query("SELECT username, password, balance, telegram_id FROM accounts")
+            if accounts:
+                text = "👥 **All Accounts:**\n\n"
+                for acc in accounts:
+                    status = "✅ Linked" if acc[3] else "❌ Not linked"
+                    text += f"- User: `{acc[0]}` | Pass: `{acc[1]}` | Bal: ${acc[2]} | {status}\n"
+            else:
+                text = "No accounts found."
+            bot.send_message(call.message.chat.id, text, parse_mode="Markdown")
+            
+        elif call.data == "admin_add_bal":
+            msg = bot.send_message(call.message.chat.id, "Enter Username and Amount (Format: `Username 15.5`):", parse_mode="Markdown")
+            bot.register_next_step_handler(msg, process_add_balance)
+    except Exception as e:
+        print(f"❌ Error in handle_query: {e}")
+
+# ================= دوال الأدمن (Next Step Handlers) =================
+def process_create_login(message):
+    try:
+        username, password = message.text.split()
+        if execute_query("INSERT INTO accounts (username, password) VALUES (?, ?)", (username, password)):
+            bot.send_message(message.chat.id, f"✅ Account Created Successfully!\n- Username: `{username}`\n- Password: `{password}`", parse_mode="Markdown")
+            # تسجيل العملية
+            execute_query("INSERT INTO transactions (username, amount, type) VALUES (?, ?, ?)", (username, 0, 'create_account'))
+        else:
+            bot.send_message(message.chat.id, "❌ Error creating account.")
+    except sqlite3.IntegrityError:
+        bot.send_message(message.chat.id, "❌ Error: Username already exists.")
+    except ValueError:
+        bot.send_message(message.chat.id, "❌ Error: Format must be `Username Password`.", parse_mode="Markdown")
+    except Exception as e:
+        print(f"❌ Error in process_create_login: {e}")
+        bot.send_message(message.chat.id, "❌ An error occurred. Please try again.")
+
+def process_delete_login(message):
+    try:
+        username = message.text
+        # التحقق من وجود الحساب
+        account = fetch_query("SELECT username FROM accounts WHERE username=?", (username,))
+        if account:
+            if execute_query("DELETE FROM accounts WHERE username=?", (username,)):
+                bot.send_message(message.chat.id, f"✅ Account `{username}` has been deleted.", parse_mode="Markdown")
+                execute_query("INSERT INTO transactions (username, amount, type) VALUES (?, ?, ?)", (username, 0, 'delete_account'))
+            else:
+                bot.send_message(message.chat.id, "❌ Error deleting account.")
+        else:
+            bot.send_message(message.chat.id, "❌ Account not found.")
+    except Exception as e:
+        print(f"❌ Error in process_delete_login: {e}")
+        bot.send_message(message.chat.id, "❌ An error occurred. Please try again.")
+
+def process_add_balance(message):
+    try:
+        username, amount = message.text.split()
+        amount = float(amount)
+        current = fetch_query("SELECT balance, telegram_id FROM accounts WHERE username=?", (username,))
+        if current:
+            new_bal = current[0][0] + amount
+            telegram_id = current[0][1]
+            if execute_query("UPDATE accounts SET balance=? WHERE username=?", (new_bal, username)):
+                execute_query("INSERT INTO transactions (username, amount, type) VALUES (?, ?, ?)", (username, amount, 'deposit'))
+                bot.send_message(message.chat.id, f"✅ Added ${amount} to {username}. New Balance: ${new_bal}")
+                if telegram_id:
+                    bot.send_message(telegram_id, f"💰 Your account balance has been credited with **${amount}**.\nNew Balance: **${new_bal}**", parse_mode="Markdown")
+            else:
+                bot.send_message(message.chat.id, "❌ Error updating balance.")
+        else:
+            bot.send_message(message.chat.id, "❌ Account not found.")
+    except ValueError:
+        bot.send_message(message.chat.id, "❌ Error. Please enter a valid number.")
+    except Exception as e:
+        print(f"❌ Error in process_add_balance: {e}")
+        bot.send_message(message.chat.id, "❌ Error. Format: `Username 15.5`", parse_mode="Markdown")
+
+# ================= Dashboard (لوحة التحكم) =================
+DASHBOARD_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bot Dashboard</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e, #16213e);
+            color: #fff;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .header {
+            text-align: center;
+            padding: 30px 0;
+            border-bottom: 2px solid #0f3460;
+            margin-bottom: 30px;
+        }
+        .header h1 {
+            font-size: 2.5em;
+            color: #e94560;
+            text-shadow: 0 0 20px rgba(233, 69, 96, 0.3);
+        }
+        .header p {
+            color: #aaa;
+            margin-top: 10px;
+            font-size: 1.1em;
+        }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 40px;
+        }
+        .stat-card {
+            background: rgba(255,255,255,0.05);
+            border-radius: 15px;
+            padding: 25px;
+            text-align: center;
+            border: 1px solid rgba(255,255,255,0.1);
+            backdrop-filter: blur(10px);
+            transition: transform 0.3s ease;
+        }
+        .stat-card:hover {
+            transform: translateY(-5px);
+        }
+        .stat-card .number {
+            font-size: 2.5em;
+            font-weight: bold;
+            color: #e94560;
+        }
+        .stat-card .label {
+            color: #aaa;
+            margin-top: 10px;
+            font-size: 0.9em;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        .section {
+            background: rgba(255,255,255,0.05);
+            border-radius: 15px;
+            padding: 25px;
+            margin-bottom: 30px;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        .section h2 {
+            color: #e94560;
+            margin-bottom: 15px;
+            font-size: 1.5em;
+        }
+        .user-list {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 15px;
+        }
+        .user-item {
+            background: rgba(255,255,255,0.03);
+            padding: 15px;
+            border-radius: 10px;
+            border-left: 3px solid #e94560;
+        }
+        .user-item .username { font-weight: bold; color: #fff; }
+        .user-item .detail { color: #aaa; font-size: 0.9em; margin-top: 5px; }
+        .last-updated {
+            text-align: center;
+            color: #666;
+            margin-top: 20px;
+            font-size: 0.8em;
+        }
+        .badge {
+            display: inline-block;
+            padding: 2px 10px;
+            border-radius: 20px;
+            font-size: 0.75em;
+            margin-left: 10px;
+        }
+        .badge-online { background: #00b894; color: #fff; }
+        .badge-offline { background: #636e72; color: #fff; }
+        .badge-admin { background: #e94560; color: #fff; }
+        .badge-user { background: #0984e3; color: #fff; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🤖 Bot Dashboard</h1>
+            <p>Real-time statistics and management panel</p>
+            <p style="font-size: 0.8em; color: #666; margin-top: 5px;">Last updated: {{ last_updated }}</p>
+        </div>
+
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="number">{{ total_users }}</div>
+                <div class="label">Total Users</div>
+            </div>
+            <div class="stat-card">
+                <div class="number">{{ active_users }}</div>
+                <div class="label">Active Users</div>
+            </div>
+            <div class="stat-card">
+                <div class="number">${{ total_balance }}</div>
+                <div class="label">Total Balance</div>
+            </div>
+            <div class="stat-card">
+                <div class="number">{{ total_keys }}</div>
+                <div class="label">Total Keys</div>
+            </div>
+            <div class="stat-card">
+                <div class="number">{{ sold_keys }}</div>
+                <div class="label">Sold Keys</div>
+            </div>
+            <div class="stat-card">
+                <div class="number">{{ total_transactions }}</div>
+                <div class="label">Transactions</div>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>👥 Users List</h2>
+            <div class="user-list">
+                {% for user in users %}
+                <div class="user-item">
+                    <div>
+                        <span class="username">{{ user[0] }}</span>
+                        <span class="badge {% if user[3] %}badge-online{% else %}badge-offline{% endif %}">
+                            {% if user[3] %}Online{% else %}Offline{% endif %}
+                        </span>
+                        <span class="badge {% if user[0] == 'admin' %}badge-admin{% else %}badge-user{% endif %}">
+                            {% if user[0] == 'admin' %}Admin{% else %}User{% endif %}
+                        </span>
+                    </div>
+                    <div class="detail">Balance: ${{ "%.2f"|format(user[2]) }}</div>
+                    <div class="detail" style="font-size: 0.8em;">Created: {{ user[4] }}</div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+
+        <div class="last-updated">
+            Dashboard automatically refreshes every 30 seconds
+        </div>
+    </div>
+
+    <script>
+        // Auto-refresh the page every 30 seconds
+        setTimeout(function() {
+            location.reload();
+        }, 30000);
+    </script>
+</body>
+</html>
+"""
+
+@app.route('/dashboard')
+def dashboard():
+    try:
+        # جلب الإحصائيات
+        total_users = fetch_query("SELECT COUNT(*) FROM accounts")[0][0] if fetch_query("SELECT COUNT(*) FROM accounts") else 0
+        active_users = fetch_query("SELECT COUNT(*) FROM accounts WHERE telegram_id IS NOT NULL")[0][0] if fetch_query("SELECT COUNT(*) FROM accounts WHERE telegram_id IS NOT NULL") else 0
+        total_balance = fetch_query("SELECT SUM(balance) FROM accounts")[0][0] or 0
+        total_keys = fetch_query("SELECT COUNT(*) FROM stock")[0][0] if fetch_query("SELECT COUNT(*) FROM stock") else 0
+        sold_keys = fetch_query("SELECT COUNT(*) FROM stock WHERE sold=1")[0][0] if fetch_query("SELECT COUNT(*) FROM stock WHERE sold=1") else 0
+        total_transactions = fetch_query("SELECT COUNT(*) FROM transactions")[0][0] if fetch_query("SELECT COUNT(*) FROM transactions") else 0
+        
+        # جلب قائمة المستخدمين
+        users = fetch_query("SELECT username, password, balance, telegram_id, created_at FROM accounts ORDER BY created_at DESC")
+        
+        # تجهيز البيانات للـ HTML
+        context = {
+            'total_users': total_users,
+            'active_users': active_users,
+            'total_balance': f"{total_balance:.2f}",
+            'total_keys': total_keys,
+            'sold_keys': sold_keys,
+            'total_transactions': total_transactions,
+            'users': users if users else [],
+            'last_updated': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        
+        return render_template_string(DASHBOARD_HTML, **context)
+    except Exception as e:
+        print(f"❌ Dashboard error: {e}")
+        return f"<h1>Dashboard Error</h1><p>{str(e)}</p>", 500
+
+# ================= مسارات Flask (للصفحات فقط) =================
+@app.route('/', methods=['GET'])
+def home():
+    return jsonify({
+        'status': 'Bot is running',
+        'endpoints': {
+            'dashboard': '/dashboard',
+            'health': '/health',
+            'cron': '/cron/ping'
+        }
+    })
+
+@app.route('/health', methods=['GET'])
+def health():
+    # فحص صحي للاستخدام مع Cron
+    try:
+        # اختبار اتصال قاعدة البيانات
+        test = fetch_query("SELECT 1")
+        return jsonify({
+            'status': 'healthy',
+            'timestamp': datetime.datetime.now().isoformat(),
+            'db_connected': True,
+            'bot_status': 'running'
+        }), 200
+    except Exception as e:
+        return jsonify({
+            'status': 'unhealthy',
+            'error': str(e),
+            'timestamp': datetime.datetime.now().isoformat()
+        }), 500
+
+# ================= Cron-compatible endpoint =================
+@app.route('/cron/ping', methods=['GET'])
+def cron_ping():
+    """
+    Endpoint مخصص لـ Cron jobs
+    يمكن استخدامه لمراقبة البوت وإرسال تنبيهات
+    """
+    try:
+        # جلب إحصائيات سريعة
+        total_users = fetch_query("SELECT COUNT(*) FROM accounts")[0][0] if fetch_query("SELECT COUNT(*) FROM accounts") else 0
+        active_users = fetch_query("SELECT COUNT(*) FROM accounts WHERE telegram_id IS NOT NULL")[0][0] if fetch_query("SELECT COUNT(*) FROM accounts WHERE telegram_id IS NOT NULL") else 0
+        
+        return jsonify({
+            'status': 'ok',
+            'timestamp': datetime.datetime.now().isoformat(),
+            'stats': {
+                'total_users': total_users,
+                'active_users': active_users
+            }
+        }), 200
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'error': str(e),
+            'timestamp': datetime.datetime.now().isoformat()
+        }), 500
+
+# ================= تشغيل البوت بطريقة Polling مع Flask =================
+def run_bot():
+    """تشغيل البوت في Thread منفصل باستخدام Polling"""
+    print("🤖 Starting bot in polling mode...")
+    while True:
+        try:
+            # إزالة أي webhook موجود
+            bot.remove_webhook()
+            # بدء polling
+            bot.infinity_polling(timeout=60, long_polling_timeout=60)
+        except Exception as e:
+            print(f"❌ Bot polling error: {e}")
+            time.sleep(5)
+            # إعادة المحاولة في حالة الخطأ
+
+# ================= التشغيل الرئيسي =================
+if __name__ == '__main__':
+    print("=" * 50)
+    print("🚀 Starting Bot Application...")
+    print(f"📁 Database path: {DB_PATH}")
+    print(f"🤖 Bot Token: {TOKEN[:10]}...")
+    print("=" * 50)
+    
+    # تشغيل البوت في Thread منفصل
+    bot_thread = threading.Thread(target=run_bot, daemon=True)
+    bot_thread.start()
+    
+    print("🚀 Bot started in polling mode!")
+    print(f"📊 Dashboard available at: http://0.0.0.0:8080/dashboard")
+    print(f"🔍 Health check at: http://0.0.0.0:8080/health")
+    print(f"⏰ Cron endpoint at: http://0.0.0.0:8080/cron/ping")
+    print("=" * 50)
+    
+    # تشغيل Flask server
+    app.run(host='0.0.0.0', port=8080, debug=False)
