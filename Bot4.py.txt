@@ -1,0 +1,599 @@
+import telebot
+from telebot import types
+import sqlite3
+from datetime import datetime
+import time
+import threading
+
+# ================= إعدادات البوت =================
+TOKEN = '8940645484:AAFCcB6V1HoH6iXyUUh-F45_4OuovY_Tw_0'  # التوكن الجديد
+ADMIN_ID = 8254258071  # الآيدي الخاص بك كأدمن
+
+bot = telebot.TeleBot(TOKEN)
+
+# ================= إعداد قاعدة البيانات =================
+def init_db():
+    conn = sqlite3.connect('store.db', check_same_thread=False)
+    c = conn.cursor()
+    
+    # جدول المستخدمين (بدون كلمة مرور)
+    c.execute('''CREATE TABLE IF NOT EXISTS users 
+                 (telegram_id INTEGER PRIMARY KEY, username TEXT, balance REAL DEFAULT 0.0, 
+                  join_date TEXT, is_admin INTEGER DEFAULT 0)''')
+    
+    # جدول المنتجات
+    c.execute('''CREATE TABLE IF NOT EXISTS products 
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, price REAL, 
+                  category TEXT, stock INTEGER DEFAULT 0)''')
+    
+    # جدول المفاتيح
+    c.execute('''CREATE TABLE IF NOT EXISTS keys 
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, product_id INTEGER, 
+                  key_data TEXT, status TEXT DEFAULT 'available', 
+                  purchase_date TEXT, buyer_id INTEGER)''')
+    
+    # جدول المشتريات
+    c.execute('''CREATE TABLE IF NOT EXISTS purchases 
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, 
+                  product_id INTEGER, key_id INTEGER, purchase_date TEXT, 
+                  amount REAL)''')
+    
+    # إضافة الأدمن إذا لم يكن موجوداً
+    c.execute("INSERT OR IGNORE INTO users (telegram_id, username, is_admin) VALUES (?, ?, ?)", 
+              (ADMIN_ID, 'Admin', 1))
+    
+    conn.commit()
+    conn.close()
+
+init_db()
+
+def execute_query(query, params=()):
+    conn = sqlite3.connect('store.db', check_same_thread=False)
+    c = conn.cursor()
+    c.execute(query, params)
+    conn.commit()
+    conn.close()
+
+def fetch_query(query, params=()):
+    conn = sqlite3.connect('store.db', check_same_thread=False)
+    c = conn.cursor()
+    c.execute(query, params)
+    result = c.fetchall()
+    conn.close()
+    return result
+
+def get_user(telegram_id):
+    result = fetch_query("SELECT * FROM users WHERE telegram_id=?", (telegram_id,))
+    return result[0] if result else None
+
+def is_admin(telegram_id):
+    user = get_user(telegram_id)
+    return user and user[4] == 1
+
+# ================= لوحات المفاتيح =================
+def main_menu(telegram_id):
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    
+    # الأزرار الرئيسية
+    buttons = [
+        types.KeyboardButton('🛒 المتجر'),
+        types.KeyboardButton('👤 حسابي'),
+        types.KeyboardButton('💰 شحن الرصيد'),
+        types.KeyboardButton('📦 مشترياتي')
+    ]
+    markup.add(*buttons)
+    
+    # أزرار إضافية للأدمن
+    if is_admin(telegram_id):
+        admin_buttons = [
+            types.KeyboardButton('⚙️ لوحة التحكم'),
+            types.KeyboardButton('📊 إحصائيات')
+        ]
+        markup.add(*admin_buttons)
+    
+    return markup
+
+def admin_panel_markup():
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    buttons = [
+        types.InlineKeyboardButton("➕ إضافة منتج", callback_data="add_product"),
+        types.InlineKeyboardButton("🗑 حذف منتج", callback_data="delete_product"),
+        types.InlineKeyboardButton("📋 قائمة المنتجات", callback_data="list_products"),
+        types.InlineKeyboardButton("🔑 إضافة مفاتيح", callback_data="add_keys"),
+        types.InlineKeyboardButton("👥 المستخدمين", callback_data="list_users"),
+        types.InlineKeyboardButton("💰 شحن مستخدم", callback_data="add_balance"),
+        types.InlineKeyboardButton("📈 المبيعات", callback_data="sales_stats"),
+        types.InlineKeyboardButton("📝 أوامر البوت", callback_data="bot_commands")
+    ]
+    markup.add(*buttons)
+    return markup
+
+def product_categories():
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    categories = ['🎮 ألعاب', '💻 برامج', '📱 تطبيقات', '🎬 حسابات', '🎫 أخرى']
+    for cat in categories:
+        markup.add(types.InlineKeyboardButton(cat, callback_data=f"cat_{cat}"))
+    markup.add(types.InlineKeyboardButton("🏠 الرئيسية", callback_data="main_menu"))
+    return markup
+
+# ================= أمر بدء البوت =================
+@bot.message_handler(commands=['start'])
+def start_msg(message):
+    user = get_user(message.chat.id)
+    
+    if not user:
+        # تسجيل المستخدم الجديد
+        username = message.from_user.username or f"User{message.chat.id}"
+        execute_query("INSERT INTO users (telegram_id, username, join_date) VALUES (?, ?, ?)", 
+                     (message.chat.id, username, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        
+        welcome_msg = f"""🎉 **مرحباً بك في المتجر الإلكتروني!**
+
+👋 أهلاً بك {message.from_user.first_name}!
+
+✨ تم تسجيل دخولك بنجاح بدون الحاجة لكلمة مرور.
+💡 يمكنك الآن البدء في التسوق والاستمتاع بخدماتنا.
+
+📌 استخدم الأزرار أدناه للتنقل في المتجر."""
+        
+        bot.send_message(message.chat.id, welcome_msg, parse_mode="Markdown", 
+                        reply_markup=main_menu(message.chat.id))
+    else:
+        welcome_back = f"""👋 **مرحباً بعودتك!**
+
+📅 تاريخ التسجيل: {user[3] if user[3] else 'غير معروف'}
+💰 الرصيد الحالي: ${user[2]:.2f}
+
+📌 استخدم الأزرار أدناه للتنقل."""
+        bot.send_message(message.chat.id, welcome_back, parse_mode="Markdown", 
+                        reply_markup=main_menu(message.chat.id))
+
+# ================= القائمة الرئيسية =================
+@bot.message_handler(func=lambda message: message.text == '🛒 المتجر')
+def shop_menu(message):
+    if not get_user(message.chat.id):
+        bot.send_message(message.chat.id, "⚠️ يرجى استخدام /start للتسجيل أولاً.")
+        return
+    
+    bot.send_message(message.chat.id, "🛍 **اختر فئة المنتج:**", 
+                    parse_mode="Markdown", reply_markup=product_categories())
+
+@bot.message_handler(func=lambda message: message.text == '👤 حسابي')
+def profile_msg(message):
+    user = get_user(message.chat.id)
+    if not user:
+        bot.send_message(message.chat.id, "⚠️ يرجى استخدام /start للتسجيل أولاً.")
+        return
+    
+    purchases = fetch_query("SELECT COUNT(*) FROM purchases WHERE user_id=?", (message.chat.id,))
+    purchase_count = purchases[0][0] if purchases else 0
+    
+    profile_text = f"""👤 **حسابي الشخصي**
+
+🆔 المعرف: {user[1]}
+💰 الرصيد: ${user[2]:.2f}
+📅 تاريخ التسجيل: {user[3]}
+📦 عدد المشتريات: {purchase_count}
+🛡 الحالة: {'أدمن' if user[4] == 1 else 'مستخدم'}
+
+📌 استخدم الأزرار أدناه للتنقل."""
+    
+    bot.send_message(message.chat.id, profile_text, parse_mode="Markdown")
+
+@bot.message_handler(func=lambda message: message.text == '💰 شحن الرصيد')
+def deposit_msg(message):
+    user = get_user(message.chat.id)
+    if not user:
+        bot.send_message(message.chat.id, "⚠️ يرجى استخدام /start للتسجيل أولاً.")
+        return
+    
+    deposit_text = """💳 **شحن الرصيد**
+
+للشحن يرجى التواصل مع الدعم:
+📩 @Support
+
+طرق الدفع المتاحة:
+• تحويل بنكي
+• بطاقة ائتمان
+• محفظة رقمية
+
+⚠️ سيتم إضافة الرصيد خلال 24 ساعة."""
+    
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("📩 التواصل مع الدعم", url="https://t.me/Support"))
+    markup.add(types.InlineKeyboardButton("🏠 الرئيسية", callback_data="main_menu"))
+    
+    bot.send_message(message.chat.id, deposit_text, parse_mode="Markdown", reply_markup=markup)
+
+@bot.message_handler(func=lambda message: message.text == '📦 مشترياتي')
+def my_purchases(message):
+    user = get_user(message.chat.id)
+    if not user:
+        bot.send_message(message.chat.id, "⚠️ يرجى استخدام /start للتسجيل أولاً.")
+        return
+    
+    purchases = fetch_query("""
+        SELECT p.name, k.key_data, pur.purchase_date, pur.amount 
+        FROM purchases pur
+        JOIN products p ON pur.product_id = p.id
+        JOIN keys k ON pur.key_id = k.id
+        WHERE pur.user_id = ?
+        ORDER BY pur.purchase_date DESC
+    """, (message.chat.id,))
+    
+    if not purchases:
+        bot.send_message(message.chat.id, "📭 **ليس لديك مشتريات حتى الآن.**", parse_mode="Markdown")
+        return
+    
+    text = "📦 **مشترياتي السابقة:**\n\n"
+    for i, (product, key, date, amount) in enumerate(purchases[:5], 1):
+        text += f"{i}. 🎁 **{product}**\n"
+        text += f"   🔑 المفتاح: `{key}`\n"
+        text += f"   💰 السعر: ${amount:.2f}\n"
+        text += f"   📅 التاريخ: {date}\n\n"
+    
+    if len(purchases) > 5:
+        text += f"📌 وعرض {len(purchases)-5} مشتريات أخرى..."
+    
+    bot.send_message(message.chat.id, text, parse_mode="Markdown")
+
+# ================= لوحة تحكم الأدمن =================
+@bot.message_handler(func=lambda message: message.text == '⚙️ لوحة التحكم')
+def admin_panel(message):
+    if not is_admin(message.chat.id):
+        bot.send_message(message.chat.id, "⛔ **غير مصرح بهذا الأمر.**", parse_mode="Markdown")
+        return
+    
+    bot.send_message(message.chat.id, "⚙️ **لوحة التحكم الإدارية**", 
+                    parse_mode="Markdown", reply_markup=admin_panel_markup())
+
+@bot.message_handler(func=lambda message: message.text == '📊 إحصائيات')
+def stats_msg(message):
+    if not is_admin(message.chat.id):
+        return
+    
+    # إحصائيات
+    users = fetch_query("SELECT COUNT(*) FROM users")[0][0]
+    products = fetch_query("SELECT COUNT(*) FROM products")[0][0]
+    keys = fetch_query("SELECT COUNT(*) FROM keys WHERE status='available'")[0][0]
+    sales = fetch_query("SELECT COUNT(*) FROM purchases")[0][0]
+    revenue = fetch_query("SELECT SUM(amount) FROM purchases")[0][0] or 0
+    
+    stats_text = f"""📊 **إحصائيات المتجر**
+
+👥 المستخدمين: {users}
+🛍 المنتجات: {products}
+🔑 المفاتيح المتاحة: {keys}
+📦 المبيعات: {sales}
+💰 الإيرادات: ${revenue:.2f}
+
+📅 آخر تحديث: {datetime.now().strftime("%Y-%m-%d %H:%M")}"""
+    
+    bot.send_message(message.chat.id, stats_text, parse_mode="Markdown")
+
+# ================= الكول باك =================
+@bot.callback_query_handler(func=lambda call: True)
+def handle_query(call):
+    user = get_user(call.message.chat.id)
+    if not user:
+        bot.send_message(call.message.chat.id, "⚠️ يرجى استخدام /start للتسجيل أولاً.")
+        return
+    
+    # قائمة الفئات
+    if call.data.startswith('cat_'):
+        category = call.data.replace('cat_', '')
+        products = fetch_query("SELECT id, name, price, stock FROM products WHERE category=?", (category,))
+        
+        if not products:
+            bot.answer_callback_query(call.id, "❌ لا يوجد منتجات في هذه الفئة")
+            return
+        
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        for prod in products:
+            markup.add(types.InlineKeyboardButton(
+                f"{prod[1]} - ${prod[2]:.2f} ({prod[3]} متاح)", 
+                callback_data=f"buy_{prod[0]}"
+            ))
+        markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="main_menu"))
+        
+        bot.edit_message_text(f"🛍 **منتجات {category}:**", 
+                             call.message.chat.id, call.message.message_id,
+                             parse_mode="Markdown", reply_markup=markup)
+    
+    # شراء منتج
+    elif call.data.startswith('buy_'):
+        product_id = int(call.data.replace('buy_', ''))
+        product = fetch_query("SELECT name, price FROM products WHERE id=?", (product_id,))
+        
+        if not product:
+            bot.answer_callback_query(call.id, "❌ المنتج غير موجود")
+            return
+        
+        # التحقق من وجود مفتاح متاح
+        key = fetch_query("SELECT id, key_data FROM keys WHERE product_id=? AND status='available' LIMIT 1", 
+                         (product_id,))
+        
+        if not key:
+            bot.answer_callback_query(call.id, "❌ المنتج غير متوفر حالياً")
+            return
+        
+        # عرض تأكيد الشراء
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton("✅ تأكيد الشراء", callback_data=f"confirm_{product_id}_{key[0][0]}"),
+            types.InlineKeyboardButton("❌ إلغاء", callback_data="main_menu")
+        )
+        
+        bot.edit_message_text(f"🛒 **تأكيد الشراء**\n\n"
+                             f"المنتج: {product[0][0]}\n"
+                             f"السعر: ${product[0][1]:.2f}\n"
+                             f"رصيدك: ${user[2]:.2f}\n\n"
+                             f"هل أنت متأكد من شراء هذا المنتج؟",
+                             call.message.chat.id, call.message.message_id,
+                             parse_mode="Markdown", reply_markup=markup)
+    
+    # تأكيد الشراء
+    elif call.data.startswith('confirm_'):
+        _, product_id, key_id = call.data.split('_')
+        product_id = int(product_id)
+        key_id = int(key_id)
+        
+        product = fetch_query("SELECT name, price FROM products WHERE id=?", (product_id,))
+        if not product:
+            bot.answer_callback_query(call.id, "❌ خطأ في المنتج")
+            return
+        
+        price = product[0][1]
+        
+        if user[2] < price:
+            bot.answer_callback_query(call.id, "❌ الرصيد غير كافٍ")
+            return
+        
+        # تنفيذ الشراء
+        execute_query("UPDATE users SET balance = balance - ? WHERE telegram_id = ?", 
+                     (price, call.message.chat.id))
+        execute_query("UPDATE keys SET status='sold', purchase_date=?, buyer_id=? WHERE id=?", 
+                     (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), call.message.chat.id, key_id))
+        execute_query("INSERT INTO purchases (user_id, product_id, key_id, purchase_date, amount) VALUES (?, ?, ?, ?, ?)",
+                     (call.message.chat.id, product_id, key_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), price))
+        
+        # إرسال المفتاح للمستخدم
+        key_data = fetch_query("SELECT key_data FROM keys WHERE id=?", (key_id,))[0][0]
+        
+        bot.edit_message_text(f"✅ **تم الشراء بنجاح!**\n\n"
+                             f"🎁 المنتج: {product[0][0]}\n"
+                             f"💰 المبلغ: ${price:.2f}\n"
+                             f"🔑 المفتاح: `{key_data}`\n\n"
+                             f"📌 تم خصم المبلغ من رصيدك.",
+                             call.message.chat.id, call.message.message_id,
+                             parse_mode="Markdown")
+    
+    # القائمة الرئيسية
+    elif call.data == "main_menu":
+        bot.edit_message_text("🏠 **القائمة الرئيسية**", 
+                             call.message.chat.id, call.message.message_id,
+                             parse_mode="Markdown", reply_markup=main_menu(call.message.chat.id))
+    
+    # أوامر الأدمن
+    elif call.data == "add_product":
+        msg = bot.send_message(call.message.chat.id, "📝 **إضافة منتج جديد**\n\nأدخل اسم المنتج:")
+        bot.register_next_step_handler(msg, process_add_product_name)
+    
+    elif call.data == "delete_product":
+        products = fetch_query("SELECT id, name FROM products")
+        if not products:
+            bot.send_message(call.message.chat.id, "❌ لا يوجد منتجات")
+            return
+        
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        for prod in products:
+            markup.add(types.InlineKeyboardButton(f"❌ {prod[1]}", callback_data=f"del_prod_{prod[0]}"))
+        markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="main_menu"))
+        
+        bot.edit_message_text("🗑 **اختر منتج للحذف:**", 
+                             call.message.chat.id, call.message.message_id,
+                             parse_mode="Markdown", reply_markup=markup)
+    
+    elif call.data == "list_products":
+        products = fetch_query("SELECT id, name, price, category, stock FROM products")
+        if not products:
+            bot.send_message(call.message.chat.id, "❌ لا يوجد منتجات")
+            return
+        
+        text = "📋 **قائمة المنتجات:**\n\n"
+        for prod in products:
+            text += f"🆔 {prod[0]} - {prod[1]}\n"
+            text += f"   💰 ${prod[2]:.2f} | 📂 {prod[3]} | 📦 {prod[4]}\n\n"
+        
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="Markdown")
+    
+    elif call.data == "add_keys":
+        products = fetch_query("SELECT id, name FROM products")
+        if not products:
+            bot.send_message(call.message.chat.id, "❌ لا يوجد منتجات")
+            return
+        
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        for prod in products:
+            markup.add(types.InlineKeyboardButton(f"🔑 {prod[1]}", callback_data=f"key_prod_{prod[0]}"))
+        markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="main_menu"))
+        
+        bot.edit_message_text("🔑 **اختر منتج لإضافة مفاتيح:**", 
+                             call.message.chat.id, call.message.message_id,
+                             parse_mode="Markdown", reply_markup=markup)
+    
+    elif call.data.startswith('key_prod_'):
+        product_id = call.data.replace('key_prod_', '')
+        msg = bot.send_message(call.message.chat.id, f"🔑 أدخل المفاتيح (مفتاح لكل سطر):")
+        bot.register_next_step_handler(msg, lambda m: process_add_keys(m, product_id))
+    
+    elif call.data == "list_users":
+        users = fetch_query("SELECT username, telegram_id, balance, join_date FROM users ORDER BY join_date DESC LIMIT 20")
+        if not users:
+            bot.send_message(call.message.chat.id, "❌ لا يوجد مستخدمين")
+            return
+        
+        text = "👥 **أحدث المستخدمين:**\n\n"
+        for user_data in users:
+            text += f"🆔 {user_data[0]}\n"
+            text += f"   💰 ${user_data[2]:.2f} | 📅 {user_data[3]}\n\n"
+        
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="Markdown")
+    
+    elif call.data == "add_balance":
+        users = fetch_query("SELECT username, telegram_id FROM users ORDER BY username")
+        if not users:
+            bot.send_message(call.message.chat.id, "❌ لا يوجد مستخدمين")
+            return
+        
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        for user_data in users[:10]:
+            markup.add(types.InlineKeyboardButton(f"💵 {user_data[0]}", callback_data=f"bal_user_{user_data[1]}"))
+        markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="main_menu"))
+        
+        bot.edit_message_text("💰 **اختر مستخدم للشحن:**", 
+                             call.message.chat.id, call.message.message_id,
+                             parse_mode="Markdown", reply_markup=markup)
+    
+    elif call.data.startswith('bal_user_'):
+        user_id = int(call.data.replace('bal_user_', ''))
+        msg = bot.send_message(call.message.chat.id, "💰 أدخل المبلغ للشحن:")
+        bot.register_next_step_handler(msg, lambda m: process_add_balance(m, user_id))
+    
+    elif call.data == "sales_stats":
+        sales = fetch_query("""
+            SELECT p.name, COUNT(*), SUM(pur.amount) 
+            FROM purchases pur
+            JOIN products p ON pur.product_id = p.id
+            GROUP BY pur.product_id
+            ORDER BY SUM(pur.amount) DESC
+        """)
+        
+        if not sales:
+            bot.send_message(call.message.chat.id, "📊 لا توجد مبيعات")
+            return
+        
+        text = "📈 **إحصائيات المبيعات:**\n\n"
+        for sale in sales:
+            text += f"🎁 {sale[0]}\n"
+            text += f"   📦 {sale[1]} عملية | 💰 ${sale[2]:.2f}\n\n"
+        
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="Markdown")
+    
+    elif call.data == "bot_commands":
+        commands_text = """📝 **أوامر البوت المتاحة:**
+
+/start - بدء البوت وتسجيل الدخول
+
+🛒 **أزرار المتجر:**
+• المتجر - عرض المنتجات
+• حسابي - عرض معلومات حسابك
+• شحن الرصيد - طرق الشحن
+• مشترياتي - عرض مشترياتك
+
+⚙️ **أزرار الأدمن:**
+• لوحة التحكم - الإدارة
+• إحصائيات - عرض الإحصائيات
+
+📌 جميع الأوامر متاحة عبر الأزرار."""
+        
+        bot.edit_message_text(commands_text, call.message.chat.id, call.message.message_id, 
+                            parse_mode="Markdown")
+    
+    elif call.data.startswith('del_prod_'):
+        product_id = int(call.data.replace('del_prod_', ''))
+        execute_query("DELETE FROM products WHERE id=?", (product_id,))
+        bot.answer_callback_query(call.id, "✅ تم حذف المنتج بنجاح")
+        bot.edit_message_text("✅ **تم حذف المنتج بنجاح**", 
+                             call.message.chat.id, call.message.message_id,
+                             parse_mode="Markdown")
+
+# ================= دوال المعالجة الإضافية =================
+def process_add_product_name(message):
+    name = message.text
+    msg = bot.send_message(message.chat.id, "💰 أدخل سعر المنتج:")
+    bot.register_next_step_handler(msg, lambda m: process_add_product_price(m, name))
+
+def process_add_product_price(message, name):
+    try:
+        price = float(message.text)
+        msg = bot.send_message(message.chat.id, "📂 أدخل فئة المنتج (ألعاب/برامج/تطبيقات/حسابات/أخرى):")
+        bot.register_next_step_handler(msg, lambda m: process_add_product_category(m, name, price))
+    except ValueError:
+        bot.send_message(message.chat.id, "❌ يرجى إدخال رقم صحيح للسعر.")
+
+def process_add_product_category(message, name, price):
+    category = message.text
+    msg = bot.send_message(message.chat.id, "📦 أدخل كمية المنتج:")
+    bot.register_next_step_handler(msg, lambda m: process_add_product_stock(m, name, price, category))
+
+def process_add_product_stock(message, name, price, category):
+    try:
+        stock = int(message.text)
+        execute_query("INSERT INTO products (name, price, category, stock) VALUES (?, ?, ?, ?)", 
+                     (name, price, category, stock))
+        bot.send_message(message.chat.id, f"✅ **تم إضافة المنتج بنجاح!**\n\n"
+                         f"📝 الاسم: {name}\n"
+                         f"💰 السعر: ${price:.2f}\n"
+                         f"📂 الفئة: {category}\n"
+                         f"📦 الكمية: {stock}", parse_mode="Markdown")
+    except ValueError:
+        bot.send_message(message.chat.id, "❌ يرجى إدخال رقم صحيح للكمية.")
+
+def process_add_keys(message, product_id):
+    keys = message.text.strip().split('\n')
+    for key in keys:
+        if key.strip():
+            execute_query("INSERT INTO keys (product_id, key_data) VALUES (?, ?)", 
+                         (product_id, key.strip()))
+    
+    # تحديث الكمية في المنتج
+    execute_query("UPDATE products SET stock = stock + ? WHERE id = ?", (len(keys), product_id))
+    
+    bot.send_message(message.chat.id, f"✅ **تم إضافة {len(keys)} مفتاح/مفاتيح بنجاح!**", parse_mode="Markdown")
+
+def process_add_balance(message, user_id):
+    try:
+        amount = float(message.text)
+        user = get_user(user_id)
+        if not user:
+            bot.send_message(message.chat.id, "❌ المستخدم غير موجود")
+            return
+        
+        execute_query("UPDATE users SET balance = balance + ? WHERE telegram_id = ?", (amount, user_id))
+        bot.send_message(message.chat.id, f"✅ **تم شحن الرصيد بنجاح!**\n\n"
+                         f"👤 المستخدم: {user[1]}\n"
+                         f"💰 المبلغ: ${amount:.2f}\n"
+                         f"📊 الرصيد الجديد: ${user[2] + amount:.2f}", parse_mode="Markdown")
+        
+        # إرسال إشعار للمستخدم
+        try:
+            bot.send_message(user_id, f"💰 **تم شحن رصيدك بمبلغ ${amount:.2f}**\n"
+                             f"📊 الرصيد الحالي: ${user[2] + amount:.2f}", parse_mode="Markdown")
+        except:
+            pass
+    except ValueError:
+        bot.send_message(message.chat.id, "❌ يرجى إدخال رقم صحيح للمبلغ.")
+
+# ================= تشغيل البوت =================
+if __name__ == '__main__':
+    print("=" * 50)
+    print("🤖 BOT IS RUNNING IN POLLING MODE")
+    print("=" * 50)
+    print(f"📊 Bot Token: {TOKEN[:10]}...")
+    print(f"👑 Admin ID: {ADMIN_ID}")
+    print(f"📅 Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 50)
+    print("✅ Bot is ready to receive messages!")
+    print("Press Ctrl+C to stop the bot.")
+    print("=" * 50)
+    
+    # تشغيل البوت في وضع الـ Polling
+    try:
+        bot.polling(none_stop=True, interval=0, timeout=20)
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        print("🔄 Restarting bot in 5 seconds...")
+        time.sleep(5)
+        # إعادة التشغيل التلقائي في حالة وجود خطأ
+        bot.polling(none_stop=True, interval=0, timeout=20)
