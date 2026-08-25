@@ -1,0 +1,696 @@
+"""
+MESTRAX Proxy Bot — Professional Edition
+Upgraded UI, inline buttons, persistent JSON storage, safer validation,
+better admin/reseller controls, activation history, and statistics.
+
+IMPORTANT:
+- Put BOT_TOKEN and OWNER_PASSWORD in environment variables.
+- The token that was previously placed directly in the uploaded source should
+  be revoked/regenerated in BotFather if it is still active.
+"""
+
+import json
+import logging
+import os
+import secrets
+import string
+import threading
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+from flask import Flask
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
+
+# ─────────────────────────────────────────────────────────────
+# Web health server (Render-friendly)
+# ─────────────────────────────────────────────────────────────
+app_flask = Flask(__name__)
+
+@app_flask.route("/")
+def home():
+    return "✅ MESTRAX Proxy Bot is running!"
+
+@app_flask.route("/health")
+def health():
+    return "OK", 200
+
+def run_flask():
+    # Render provides PORT; local fallback is 10000.
+    port = int(os.environ.get("PORT", "10000"))
+    app_flask.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+
+# ─────────────────────────────────────────────────────────────
+# Configuration
+# ─────────────────────────────────────────────────────────────
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
+try:
+    OWNER_ID = int(os.environ.get("OWNER_ID", "0").strip())
+except ValueError:
+    raise RuntimeError("OWNER_ID must be a numeric Telegram user ID.")
+OWNER_PASSWORD = os.environ.get("OWNER_PASSWORD", "").strip()
+BOT_OWNER_NAME = os.environ.get("BOT_OWNER_NAME", "MESTRAX PROXY PREMIUM").strip()
+
+DATA_FILE = Path(os.environ.get("DATA_FILE", "mestrax_data.json"))
+KEY_LENGTH = 12
+
+logging.basicConfig(
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger("mestrax")
+
+# ─────────────────────────────────────────────────────────────
+# Persistent storage
+# ─────────────────────────────────────────────────────────────
+def load_data():
+    default = {"active_keys": [], "used_keys": [], "resellers": []}
+    if not DATA_FILE.exists():
+        return default
+    try:
+        data = json.loads(DATA_FILE.read_text(encoding="utf-8"))
+        return {
+            "active_keys": data.get("active_keys", []),
+            "used_keys": data.get("used_keys", []),
+            "resellers": data.get("resellers", []),
+        }
+    except Exception:
+        logger.exception("Could not load data file; starting with empty data.")
+        return default
+
+data = load_data()
+active_keys = data["active_keys"]
+used_keys = data["used_keys"]
+resellers = set(data["resellers"])
+save_lock = threading.Lock()
+
+def now_utc():
+    return datetime.now(timezone.utc)
+
+def iso(dt):
+    return dt.astimezone(timezone.utc).isoformat()
+
+def parse_dt(value):
+    try:
+        return datetime.fromisoformat(value)
+    except Exception:
+        return now_utc()
+
+def save_data():
+    payload = {
+        "active_keys": active_keys,
+        "used_keys": used_keys,
+        "resellers": sorted(resellers),
+    }
+    tmp = DATA_FILE.with_suffix(".tmp")
+    with save_lock:
+        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        tmp.replace(DATA_FILE)
+
+def clean_expired_keys():
+    now = now_utc()
+    active_keys[:] = [k for k in active_keys if parse_dt(k["expiry"]) > now]
+    save_data()
+
+# ─────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────
+def gen_key():
+    alphabet = string.ascii_uppercase + string.digits
+    raw = "".join(secrets.choice(alphabet) for _ in range(KEY_LENGTH))
+    return f"MX-{raw[:4]}-{raw[4:8]}-{raw[8:]}"
+
+def valid_ip(value):
+    # Public IPv4/IPv6 validation without requiring an extra dependency.
+    import ipaddress
+    try:
+        ip = ipaddress.ip_address(value.strip())
+        return not ip.is_private and not ip.is_loopback and not ip.is_reserved
+    except ValueError:
+        return False
+
+def is_owner(uid):
+    return uid == OWNER_ID
+
+def is_reseller(uid):
+    return uid in resellers
+
+def is_staff(uid):
+    return is_owner(uid) or is_reseller(uid)
+
+def fmt_expiry(value):
+    return parse_dt(value).astimezone().strftime("%Y-%m-%d %H:%M")
+
+def status_icon(key):
+    return "🚫" if key.get("banned") else "🟢"
+
+# ─────────────────────────────────────────────────────────────
+# Professional inline keyboards
+# Telegram does not support arbitrary button colors in normal Bot API
+# keyboards; this UI uses inline buttons, emojis and structured layout.
+# ─────────────────────────────────────────────────────────────
+def main_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🔑 Activate Key", callback_data="activate"),
+            InlineKeyboardButton("🌐 My IP", callback_data="myip"),
+        ],
+        [
+            InlineKeyboardButton("📊 Statistics", callback_data="stats"),
+            InlineKeyboardButton("📖 Guide", callback_data="guide"),
+        ],
+        [
+            InlineKeyboardButton("👤 Support", callback_data="support"),
+            InlineKeyboardButton("💎 My Account", callback_data="account"),
+        ],
+        [InlineKeyboardButton("🔐 Admin / Reseller", callback_data="panel")],
+    ])
+
+def back_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu")]
+    ])
+
+def owner_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🔑 Generate", callback_data="gen"),
+            InlineKeyboardButton("📦 All Keys", callback_data="allkeys"),
+        ],
+        [
+            InlineKeyboardButton("➕ Add Reseller", callback_data="add_reseller"),
+            InlineKeyboardButton("➖ Remove", callback_data="remove_reseller"),
+        ],
+        [
+            InlineKeyboardButton("🚫 Ban Key", callback_data="ban"),
+            InlineKeyboardButton("🗑 Clear Keys", callback_data="clear"),
+        ],
+        [
+            InlineKeyboardButton("📈 Admin Stats", callback_data="admin_stats"),
+        ],
+        [InlineKeyboardButton("⬅️ Main Menu", callback_data="menu")],
+    ])
+
+def reseller_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🔑 Generate", callback_data="gen"),
+            InlineKeyboardButton("📦 My Keys", callback_data="mykeys"),
+        ],
+        [InlineKeyboardButton("📈 My Stats", callback_data="my_stats")],
+        [InlineKeyboardButton("⬅️ Main Menu", callback_data="menu")],
+    ])
+
+def quantity_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("1", callback_data="qty:1"),
+            InlineKeyboardButton("5", callback_data="qty:5"),
+            InlineKeyboardButton("10", callback_data="qty:10"),
+        ],
+        [
+            InlineKeyboardButton("25", callback_data="qty:25"),
+            InlineKeyboardButton("50", callback_data="qty:50"),
+        ],
+        [InlineKeyboardButton("⬅️ Cancel", callback_data="menu")],
+    ])
+
+def duration_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("1 Day", callback_data="days:1"),
+            InlineKeyboardButton("7 Days", callback_data="days:7"),
+        ],
+        [
+            InlineKeyboardButton("30 Days", callback_data="days:30"),
+            InlineKeyboardButton("365 Days", callback_data="days:365"),
+        ],
+        [InlineKeyboardButton("⬅️ Cancel", callback_data="menu")],
+    ])
+
+# ─────────────────────────────────────────────────────────────
+# Text screens
+# ─────────────────────────────────────────────────────────────
+WELCOME = (
+    "╭━━━〔 🚀 MESTRAX PROXY 〕━━━╮\n"
+    "┃ ✦ Professional Proxy Manager\n"
+    "┃ ✦ Fast • Secure • Simple\n"
+    "┃ ✦ Owner: MESTRAX PROXY PREMIUM\n"
+    "╰━━━━━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
+    "🔐 <b>Activation Center</b>\n"
+    "Use the buttons below to activate your key,\n"
+    "check your account, or contact support."
+)
+
+GUIDE = (
+    "📖 <b>How to Use</b>\n\n"
+    "① Tap <b>🔑 Activate Key</b>\n"
+    "② Send your activation key\n"
+    "③ Send your public IP address\n"
+    "④ The key is consumed and activation is recorded\n\n"
+    "💡 Keep your key private and use a valid public IP."
+)
+
+def stats_text():
+    clean_expired_keys()
+    active = len(active_keys)
+    used = len(used_keys)
+    banned = sum(1 for k in active_keys if k.get("banned"))
+    return (
+        "📊 <b>Server Statistics</b>\n\n"
+        f"🟢 Active keys: <b>{active}</b>\n"
+        f"✅ Activated keys: <b>{used}</b>\n"
+        f"🚫 Banned active keys: <b>{banned}</b>\n"
+        f"👥 Resellers: <b>{len(resellers)}</b>\n"
+        "🟢 Service: <b>Online</b>"
+    )
+
+async def show_menu(update: Update):
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            WELCOME, reply_markup=main_keyboard(), parse_mode="HTML"
+        )
+    else:
+        await update.message.reply_text(
+            WELCOME, reply_markup=main_keyboard(), parse_mode="HTML"
+        )
+
+# ─────────────────────────────────────────────────────────────
+# Start
+# ─────────────────────────────────────────────────────────────
+async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data.clear()
+    clean_expired_keys()
+    await show_menu(update)
+
+# ─────────────────────────────────────────────────────────────
+# Callback buttons
+# ─────────────────────────────────────────────────────────────
+async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = update.effective_user.id
+    action = q.data
+
+    if action == "menu":
+        ctx.user_data.clear()
+        await q.edit_message_text(WELCOME, reply_markup=main_keyboard(), parse_mode="HTML")
+        return
+
+    if action == "activate":
+        ctx.user_data["state"] = "waiting_key"
+        await q.edit_message_text(
+            "🔑 <b>Activate Key</b>\n\nSend your activation key now.",
+            reply_markup=back_keyboard(),
+            parse_mode="HTML",
+        )
+        return
+
+    if action == "myip":
+        await q.edit_message_text(
+            "🌐 <b>Your IP</b>\n\n"
+            "Use the following service to check your public IP:\n"
+            "https://api.ipify.org?format=json",
+            reply_markup=back_keyboard(),
+            parse_mode="HTML",
+        )
+        return
+
+    if action == "stats":
+        await q.edit_message_text(stats_text(), reply_markup=back_keyboard(), parse_mode="HTML")
+        return
+
+    if action == "guide":
+        await q.edit_message_text(GUIDE, reply_markup=back_keyboard(), parse_mode="HTML")
+        return
+
+    if action == "support":
+        await q.edit_message_text(
+            "👤 <b>Support</b>\n\n"
+            "Contact the bot owner for keys, activation problems, or reseller access.",
+            reply_markup=back_keyboard(),
+            parse_mode="HTML",
+        )
+        return
+
+    if action == "account":
+        activated = [k for k in used_keys if k.get("user_id") == uid]
+        await q.edit_message_text(
+            "💎 <b>My Account</b>\n\n"
+            f"🆔 User ID: <code>{uid}</code>\n"
+            f"🔐 Activations: <b>{len(activated)}</b>\n"
+            f"👤 Role: <b>{'Owner' if is_owner(uid) else 'Reseller' if is_reseller(uid) else 'User'}</b>",
+            reply_markup=back_keyboard(),
+            parse_mode="HTML",
+        )
+        return
+
+    if action == "panel":
+        if is_owner(uid):
+            await q.edit_message_text("🔐 <b>Owner Panel</b>", reply_markup=owner_keyboard(), parse_mode="HTML")
+        elif is_reseller(uid):
+            await q.edit_message_text("💼 <b>Reseller Panel</b>", reply_markup=reseller_keyboard(), parse_mode="HTML")
+        else:
+            ctx.user_data["state"] = "waiting_pass"
+            await q.edit_message_text(
+                "🔒 <b>Protected Panel</b>\n\nSend the owner password.",
+                reply_markup=back_keyboard(),
+                parse_mode="HTML",
+            )
+        return
+
+    if action == "gen" and is_staff(uid):
+        ctx.user_data["state"] = "waiting_bulk_amount"
+        await q.edit_message_text(
+            "🔢 <b>Generate Keys</b>\n\nChoose the quantity:",
+            reply_markup=quantity_keyboard(),
+            parse_mode="HTML",
+        )
+        return
+
+    if action.startswith("qty:") and is_staff(uid):
+        amount = int(action.split(":")[1])
+        ctx.user_data["gen_amount"] = amount
+        ctx.user_data["state"] = "waiting_bulk_duration"
+        await q.edit_message_text(
+            f"🔢 Quantity: <b>{amount}</b>\n\n⏳ Choose duration:",
+            reply_markup=duration_keyboard(),
+            parse_mode="HTML",
+        )
+        return
+
+    if action.startswith("days:") and is_staff(uid):
+        days = int(action.split(":")[1])
+        amount = int(ctx.user_data.get("gen_amount", 1))
+        generated = []
+
+        for _ in range(amount):
+            k = gen_key()
+            expiry = now_utc() + timedelta(days=days)
+            active_keys.append({
+                "key": k,
+                "expiry": iso(expiry),
+                "duration": days,
+                "creator_id": uid,
+                "banned": False,
+                "created_at": iso(now_utc()),
+            })
+            generated.append(k)
+
+        save_data()
+        ctx.user_data["state"] = "owner_panel" if is_owner(uid) else "reseller_panel"
+        kb = owner_keyboard() if is_owner(uid) else reseller_keyboard()
+
+        # Telegram message limit protection.
+        body = "\n".join(f"<code>{k}</code>" for k in generated)
+        if len(body) > 3800:
+            body = body[:3700] + "\n…"
+        await q.edit_message_text(
+            f"✅ <b>Generated {amount} key(s)</b>\n"
+            f"⏳ Duration: <b>{days} day(s)</b>\n\n{body}",
+            reply_markup=kb,
+            parse_mode="HTML",
+        )
+        return
+
+    if action == "allkeys" and is_owner(uid):
+        clean_expired_keys()
+        if not active_keys:
+            text = "📦 <b>All Keys</b>\n\nNo active keys."
+        else:
+            rows = []
+            for k in active_keys[:40]:
+                rows.append(
+                    f"{status_icon(k)} <code>{k['key']}</code>\n"
+                    f"   ⏰ {fmt_expiry(k['expiry'])}"
+                )
+            text = "📦 <b>Active Keys</b>\n\n" + "\n".join(rows)
+            if len(active_keys) > 40:
+                text += f"\n\n… and {len(active_keys) - 40} more."
+        await q.edit_message_text(text, reply_markup=owner_keyboard(), parse_mode="HTML")
+        return
+
+    if action == "mykeys" and is_reseller(uid):
+        clean_expired_keys()
+        mine = [k for k in active_keys if k.get("creator_id") == uid]
+        if not mine:
+            text = "📦 <b>My Keys</b>\n\nYou have no active keys."
+        else:
+            rows = [
+                f"{status_icon(k)} <code>{k['key']}</code> — {fmt_expiry(k['expiry'])}"
+                for k in mine[:40]
+            ]
+            text = "📦 <b>My Active Keys</b>\n\n" + "\n".join(rows)
+        await q.edit_message_text(text, reply_markup=reseller_keyboard(), parse_mode="HTML")
+        return
+
+    if action == "my_stats" and is_reseller(uid):
+        mine = [k for k in active_keys if k.get("creator_id") == uid]
+        used = [k for k in used_keys if k.get("creator_id") == uid]
+        await q.edit_message_text(
+            "📈 <b>My Reseller Stats</b>\n\n"
+            f"🟢 Active keys: <b>{len(mine)}</b>\n"
+            f"✅ Activated: <b>{len(used)}</b>",
+            reply_markup=reseller_keyboard(),
+            parse_mode="HTML",
+        )
+        return
+
+    if action == "admin_stats" and is_owner(uid):
+        await q.edit_message_text(stats_text(), reply_markup=owner_keyboard(), parse_mode="HTML")
+        return
+
+    if action == "add_reseller" and is_owner(uid):
+        ctx.user_data["state"] = "waiting_reseller_id"
+        await q.edit_message_text(
+            "➕ <b>Add Reseller</b>\n\nSend the Telegram User ID.",
+            reply_markup=back_keyboard(),
+            parse_mode="HTML",
+        )
+        return
+
+    if action == "remove_reseller" and is_owner(uid):
+        ctx.user_data["state"] = "waiting_remove_reseller_id"
+        await q.edit_message_text(
+            "➖ <b>Remove Reseller</b>\n\nSend the Telegram User ID.",
+            reply_markup=back_keyboard(),
+            parse_mode="HTML",
+        )
+        return
+
+    if action == "ban" and is_owner(uid):
+        ctx.user_data["state"] = "waiting_ban_key"
+        await q.edit_message_text(
+            "🚫 <b>Ban Key</b>\n\nSend the key you want to ban.",
+            reply_markup=back_keyboard(),
+            parse_mode="HTML",
+        )
+        return
+
+    if action == "clear" and is_owner(uid):
+        ctx.user_data["state"] = "confirm_clear"
+        confirm = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⚠️ YES, DELETE ALL", callback_data="confirm_clear")],
+            [InlineKeyboardButton("⬅️ Cancel", callback_data="panel")],
+        ])
+        await q.edit_message_text(
+            "🗑 <b>Delete all active keys?</b>\n\nThis action cannot be undone.",
+            reply_markup=confirm,
+            parse_mode="HTML",
+        )
+        return
+
+    if action == "confirm_clear" and is_owner(uid):
+        active_keys.clear()
+        save_data()
+        await q.edit_message_text(
+            "✅ <b>All active keys deleted.</b>",
+            reply_markup=owner_keyboard(),
+            parse_mode="HTML",
+        )
+        return
+
+# ─────────────────────────────────────────────────────────────
+# Text input states
+# ─────────────────────────────────────────────────────────────
+async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
+        return
+
+    text = update.message.text.strip()
+    uid = update.effective_user.id
+    state = ctx.user_data.get("state", "menu")
+
+    if text == "/cancel":
+        ctx.user_data.clear()
+        await update.message.reply_text(WELCOME, reply_markup=main_keyboard(), parse_mode="HTML")
+        return
+
+    if state == "waiting_pass":
+        if OWNER_PASSWORD and text == OWNER_PASSWORD:
+            ctx.user_data["state"] = "owner_panel"
+            await update.message.reply_text(
+                "✅ <b>Access Granted</b>", reply_markup=owner_keyboard(), parse_mode="HTML"
+            )
+        else:
+            ctx.user_data.clear()
+            await update.message.reply_text(
+                "❌ <b>Access denied.</b>", reply_markup=main_keyboard(), parse_mode="HTML"
+            )
+        return
+
+    if state == "waiting_key":
+        clean_expired_keys()
+        key_entry = next((k for k in active_keys if k["key"].upper() == text.upper()), None)
+
+        if not key_entry:
+            used = next((k for k in used_keys if k["key"].upper() == text.upper()), None)
+            msg = "⚠️ <b>This key has already been used.</b>" if used else "❌ <b>Invalid or expired key.</b>"
+            ctx.user_data.clear()
+            await update.message.reply_text(msg, reply_markup=main_keyboard(), parse_mode="HTML")
+            return
+
+        if key_entry.get("banned"):
+            ctx.user_data.clear()
+            await update.message.reply_text(
+                "🚫 <b>This key is banned.</b>", reply_markup=main_keyboard(), parse_mode="HTML"
+            )
+            return
+
+        ctx.user_data["pending_key"] = key_entry["key"]
+        ctx.user_data["state"] = "waiting_ip"
+        await update.message.reply_text(
+            "🌐 <b>Send your public IP address</b>\n\nExample: <code>8.8.8.8</code>",
+            reply_markup=back_keyboard(),
+            parse_mode="HTML",
+        )
+        return
+
+    if state == "waiting_ip":
+        pending = ctx.user_data.get("pending_key")
+        if not valid_ip(text):
+            await update.message.reply_text(
+                "❌ <b>Invalid public IP.</b>\nPlease send a valid public IPv4/IPv6 address.",
+                reply_markup=back_keyboard(),
+                parse_mode="HTML",
+            )
+            return
+
+        clean_expired_keys()
+        key_entry = next((k for k in active_keys if k["key"] == pending), None)
+        if not key_entry or key_entry.get("banned"):
+            ctx.user_data.clear()
+            await update.message.reply_text(
+                "❌ <b>Key is no longer valid.</b>", reply_markup=main_keyboard(), parse_mode="HTML"
+            )
+            return
+
+        active_keys.remove(key_entry)
+        used_keys.append({
+            "key": pending,
+            "user_id": uid,
+            "ip": text,
+            "activated_at": iso(now_utc()),
+            "expiry": key_entry["expiry"],
+            "creator_id": key_entry.get("creator_id"),
+        })
+        save_data()
+
+        await update.message.reply_text(
+            "╭━━〔 🟢 ACTIVATED 〕━━╮\n"
+            f"┃ 🌐 IP: <code>{text}</code>\n"
+            f"┃ ⏰ Expires: <b>{fmt_expiry(key_entry['expiry'])}</b>\n"
+            "┃ 🔐 Status: <b>Active</b>\n"
+            "╰━━━━━━━━━━━━━━━━━━━━╯\n\n"
+            "🚀 Your activation was completed successfully.",
+            reply_markup=main_keyboard(),
+            parse_mode="HTML",
+        )
+        ctx.user_data.clear()
+        return
+
+    if state == "waiting_reseller_id" and is_owner(uid):
+        if not text.isdigit():
+            await update.message.reply_text("❌ Send a numeric Telegram User ID.", reply_markup=back_keyboard())
+            return
+        rid = int(text)
+        resellers.add(rid)
+        save_data()
+        ctx.user_data["state"] = "owner_panel"
+        await update.message.reply_text(
+            f"✅ <b>Reseller added</b>\nID: <code>{rid}</code>",
+            reply_markup=owner_keyboard(),
+            parse_mode="HTML",
+        )
+        return
+
+    if state == "waiting_remove_reseller_id" and is_owner(uid):
+        if not text.isdigit():
+            await update.message.reply_text("❌ Send a numeric Telegram User ID.", reply_markup=back_keyboard())
+            return
+        rid = int(text)
+        if rid in resellers:
+            resellers.remove(rid)
+            save_data()
+            msg = f"✅ Reseller <code>{rid}</code> removed."
+        else:
+            msg = "⚠️ Reseller ID not found."
+        ctx.user_data["state"] = "owner_panel"
+        await update.message.reply_text(msg, reply_markup=owner_keyboard(), parse_mode="HTML")
+        return
+
+    if state == "waiting_ban_key" and is_owner(uid):
+        key_entry = next((k for k in active_keys if k["key"].upper() == text.upper()), None)
+        if key_entry:
+            key_entry["banned"] = True
+            save_data()
+            msg = f"🚫 <b>Key banned:</b> <code>{key_entry['key']}</code>"
+        else:
+            msg = "❌ Key not found among active keys."
+        ctx.user_data["state"] = "owner_panel"
+        await update.message.reply_text(msg, reply_markup=owner_keyboard(), parse_mode="HTML")
+        return
+
+    # If user types normal text outside a workflow, keep the UX friendly.
+    await update.message.reply_text(
+        "✨ Choose an option from the menu below.",
+        reply_markup=main_keyboard(),
+    )
+
+# ─────────────────────────────────────────────────────────────
+# Main
+# ─────────────────────────────────────────────────────────────
+def main():
+    if not BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN environment variable is missing.")
+    if not OWNER_PASSWORD:
+        raise RuntimeError("OWNER_PASSWORD environment variable is missing.")
+
+    # Start the HTTP health server in the background so Render can detect
+    # and monitor the web service while the Telegram polling loop runs.
+    threading.Thread(target=run_flask, daemon=True, name="render-health").start()
+
+    logger.info("🚀 MESTRAX Proxy Bot — Professional Edition starting...")
+    logger.info("🌐 Render health server listening on 0.0.0.0:%s", os.environ.get("PORT", "10000"))
+
+    application = Application.builder().token(BOT_TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(on_callback))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
+
+    # Polling keeps the Telegram bot online continuously. Render should run
+    # this as a Web Service (or Background Worker), not as a Cron Job.
+    application.run_polling(
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=True,
+    )
+
+if __name__ == "__main__":
+    main()
